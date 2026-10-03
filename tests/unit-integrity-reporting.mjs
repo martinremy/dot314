@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { QueryContext } from "../src/query-state.js";
 import { __testGetBridgeIntegrityState, __testSetBridgeIntegrityState, INTEGRITY_CUSTOM_TYPE, appendIntegrityEntry, reapStaleQueuedResults, reportToolResultMismatch } from "../src/index.js";
 import { setExtensionApi } from "../src/bridge-state.js";
-import { takeAgentNotice } from "../src/agent-notice.js";
+import { notePromptSource, takeAgentNotice } from "../src/agent-notice.js";
 import { runInRequestLane } from "../src/request-lane.js";
 import { withAgentNotices } from "./lib/agent-notices.mjs";
 
@@ -172,6 +172,7 @@ describe("integrity entries persisted to the pi session", () => {
 		assert.equal(sessionEntries.length, 1);
 		assert.equal(sessionEntries[0].data.label, "stale_queued_tool_results_parked");
 		assert.deepEqual(notifications, [], "no TUI warning: the parked results need no action");
+		notePromptSource("integrity-reap", true);
 		assert.deepEqual(takeAgentNotice("integrity-reap")?.message.details, { kinds: ["stale_queued_tool_results_parked"] });
 		assert.equal(JSON.stringify(diag).includes("should-not-leak"), false, "diag never carries tool output");
 		assert.equal(JSON.stringify(sessionEntries).includes("should-not-leak"), false, "session entry never carries tool output");

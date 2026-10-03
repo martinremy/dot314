@@ -28,7 +28,7 @@ import { CLAUDE_CODE_TOOL_USE_ID, ServedToolServer, type ServedToolHandler } fro
 import { resolveGetModels } from "./pi-ai-compat.ts";
 import { contentShape, debug, diagDump, makeCliDebugOptions, moduleInstanceId, parseErrorShape } from "./debug.ts";
 import { logVersions } from "./versions.ts";
-import { noteAnomaly, takeAgentNotice } from "./agent-notice.ts";
+import { noteAnomaly, notePromptSource, takeAgentNotice } from "./agent-notice.ts";
 import { preflightClaudeExecutable, resolveClaudeExecutable } from "./claude-executable.ts";
 import { connectorsEnabledFor, isChildExecutedTool } from "./connectors.ts";
 import { appendIntegrityEntry, argKeyCount, argKeys, deleteSharedSessionLane, getExtensionApi, getSharedSession, markSessionForRebuild, noteReloadWithLiveWriter, recordStartedLane, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, takeReloadWithLiveWriter, takeStartedLane, type RebuildMark, type SessionState } from "./bridge-state.ts";
@@ -1994,8 +1994,10 @@ export default function (pi: ExtensionAPI) {
 		deleteQueryLane(sessionId);
 	});
 	// With agentNotices on, the anomalies this session's requests hit
-	// since its last prompt, as one message after the user's prompt
-	// (agent-notice.ts).
+	// since its last prompt, as one message after the user's prompt, for a
+	// session a person types into only (agent-notice.ts). Pi fires input
+	// before before_agent_start for the same prompt.
+	pi.on("input", (event, ctx) => notePromptSource(ctx.sessionManager.getSessionId(), event.source === "interactive" && ctx.hasUI));
 	pi.on("before_agent_start", (_event, ctx) => takeAgentNotice(ctx.sessionManager.getSessionId()));
 	pi.on("message_end", (event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => {
 		const message = (event as { message?: AssistantMessage }).message;

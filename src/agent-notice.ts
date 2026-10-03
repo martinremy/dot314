@@ -18,6 +18,15 @@
 // process-global, by Pi session id, for the AGENT_NOTICE_SESSIONS_KEPT
 // sessions most recently noted or prompted, and every copy reads the switch
 // from the file when it notes or tells.
+//
+// Only a session a person types into is told: Pi's input event says where a
+// prompt came from, and a prompt typed in a UI marks its session a person's.
+// A subagent never has one: an in-process child runs Pi's prompt API with no
+// UI, a background child prompts over RPC or with no UI, and a Herdr pane
+// child gets its prompts from an extension. What a subagent session in this
+// process queued goes to the next person-prompted session that prompts,
+// marked as a subagent's, once per kind for that session. A child in another
+// process is never told; its anomalies are in the bridge logs only.
 
 import type { BeforeAgentStartEventResult } from "@earendil-works/pi-coding-agent";
 import { agentNoticesEnabled, displayPath } from "./config.ts";
@@ -73,9 +82,14 @@ interface SessionNotices {
 	told: Set<AnomalyKind>;
 	/** Kinds for its next prompt, oldest first. */
 	pending: AnomalyKind[];
+	/** "person" once a prompt was typed into it in a UI, for good; "agent"
+	 *  while every prompt came from a program; unset before any prompt. */
+	promptedBy?: "person" | "agent";
+	/** Subagent kinds this session was told about. */
+	toldFromSubagents: Set<AnomalyKind>;
 }
 
-const STORE_SYMBOL = Symbol.for("pi-claude-bridge.agent-notices.v1");
+const STORE_SYMBOL = Symbol.for("pi-claude-bridge.agent-notices.v2");
 
 /** Least recently used session first. */
 function store(): Map<string, SessionNotices> {
@@ -91,7 +105,7 @@ function store(): Map<string, SessionNotices> {
 /** The notices of `sessionId`, now its most recently used. */
 function sessionNotices(sessionId: string): SessionNotices {
 	const sessions = store();
-	const notices = sessions.get(sessionId) ?? { told: new Set<AnomalyKind>(), pending: [] };
+	const notices = sessions.get(sessionId) ?? { told: new Set<AnomalyKind>(), pending: [], toldFromSubagents: new Set<AnomalyKind>() };
 	sessions.delete(sessionId);
 	sessions.set(sessionId, notices);
 	for (const id of sessions.keys()) {
@@ -129,34 +143,57 @@ export function noteAnomaly(kind: AnomalyKind, owner?: string): void {
 	debug(`agent notice: ${kind} queued for session ${sessionId.slice(0, 8)}`);
 }
 
-function noticeText(kinds: AnomalyKind[]): string {
+/** Records, from Pi's input event, whether a person typed the prompt Pi
+ *  session `sessionId` is about to run, in a UI. Recorded with notices off
+ *  too: a subagent turning them on mid-run may never prompt again. */
+export function notePromptSource(sessionId: string, typedByPerson: boolean): void {
+	const notices = sessionNotices(sessionId);
+	if (typedByPerson) notices.promptedBy = "person";
+	else notices.promptedBy ??= "agent";
+}
+
+function noticeText(kinds: AnomalyKind[], subagentKinds: AnomalyKind[]): string {
+	const lines = [
+		...kinds.map((kind) => ({ kind, prefix: "" })),
+		...subagentKinds.map((kind) => ({ kind, prefix: "In a subagent: " })),
+	].map(({ kind, prefix }) => `- ${prefix}${TOLD[kind].sentence.replace(/\.$/, "")} (${kind}; ${TOLD[kind].errorShown ? "an error was shown" : "the bridge recovered"})`);
 	const room = MESSAGE_LINES - 2;
-	const shown = kinds.length > room ? kinds.slice(0, room - 1) : kinds;
+	const shown = lines.length > room ? lines.slice(0, room - 1) : lines;
 	return [
-		`Claude bridge: ${kinds.length === 1 ? "1 anomaly" : `${kinds.length} anomalies`} since your last message.`,
-		...shown.map((kind) => `- ${TOLD[kind].sentence.replace(/\.$/, "")} (${kind}; ${TOLD[kind].errorShown ? "an error was shown" : "the bridge recovered"})`),
-		...(kinds.length > shown.length ? [`- … and ${kinds.length - shown.length} more`] : []),
+		`Claude bridge: ${lines.length === 1 ? "1 anomaly" : `${lines.length} anomalies`} since your last message.`,
+		...shown,
+		...(lines.length > shown.length ? [`- … and ${lines.length - shown.length} more`] : []),
 		DEBUG
 			? `Details are in the bridge debug log (${displayPath(DEBUG_LOG_PATH)}) and diag log (${displayPath(diagLogPath())}). If one looks like a bridge bug, tell the user.`
 			: "The bridge did not record details; the user can set CLAUDE_BRIDGE_DEBUG=1 to record them in the bridge logs. If one looks like a bridge bug, tell the user.",
 	].join("\n");
 }
 
-/** The before_agent_start result for session `sessionId`: one message with
- *  every kind pending for it, or nothing. Takes them: each is told once.
- *  With agent notices off it tells nothing, even what was queued while they
- *  were on. */
+/** The before_agent_start result for session `sessionId`: for a session a
+ *  person types into, one message with every kind pending for it and for the
+ *  subagent sessions of this process, or nothing. Takes them: each is told
+ *  once. Any other session is told nothing, and with agent notices off no
+ *  session is, even what was queued while they were on. */
 export function takeAgentNotice(sessionId: string): BeforeAgentStartEventResult | undefined {
-	const notices = store().get(sessionId);
-	if (!notices || notices.pending.length === 0) return undefined;
-	if (!agentNoticesEnabled()) return undefined;
-	const kinds = sessionNotices(sessionId).pending.splice(0);
+	if (store().get(sessionId)?.promptedBy !== "person" || !agentNoticesEnabled()) return undefined;
+	const notices = sessionNotices(sessionId);
+	const kinds = notices.pending.splice(0);
+	const subagentKinds: AnomalyKind[] = [];
+	for (const other of store().values()) {
+		if (other.promptedBy !== "agent") continue;
+		for (const kind of other.pending.splice(0)) {
+			if (notices.toldFromSubagents.has(kind)) continue;
+			notices.toldFromSubagents.add(kind);
+			subagentKinds.push(kind);
+		}
+	}
+	if (kinds.length === 0 && subagentKinds.length === 0) return undefined;
 	return {
 		message: {
 			customType: AGENT_NOTICE_TYPE,
-			content: noticeText(kinds),
+			content: noticeText(kinds, subagentKinds),
 			display: true,
-			details: { kinds },
+			details: { kinds, ...(subagentKinds.length > 0 ? { subagentKinds } : {}) },
 		},
 	};
 }

@@ -4,6 +4,12 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ## 2026-10-03
 
+### Changed
+
+- **Agent notices went to subagents too.**
+  - **Before:** with `agentNotices` on, every Pi session whose requests hit an anomaly was told, subagents included. A subagent read a bridge notice in the middle of its task, while the session you were talking to never heard about it.
+  - **Now:** only a session you type into is told. Pi reports where each prompt came from, and a subagent's prompts never come from a person typing in a UI, whether it runs in-process, in the background or in a Herdr pane. Anomalies from subagents running in the same Pi process are passed on to your session, marked "In a subagent", once per kind. A subagent in another process is never told; its anomalies are in the bridge logs.
+
 ### Fixed
 
 - **A prompt that started with a slash ran as a Claude Code command.**

@@ -67,19 +67,21 @@ function fakePi() {
 	return pi;
 }
 
-function sessionCtx(sessionId) {
+function sessionCtx(sessionId, hasUI = false) {
 	const sessionManager = { getSessionId: () => sessionId, getEntries: () => [], getBranch: () => [] };
-	return { sessionManager, ui: { notify: () => {} }, cwd: process.cwd(), hasUI: false };
+	return { sessionManager, ui: { notify: () => {} }, cwd: process.cwd(), hasUI };
 }
 
-function emit(pi, event, sessionId, payload = {}) {
-	return Promise.all((pi.handlers.get(event) ?? []).map((handler) => handler({ type: event, ...payload }, sessionCtx(sessionId))));
+function emit(pi, event, sessionId, payload = {}, hasUI = false) {
+	return Promise.all((pi.handlers.get(event) ?? []).map((handler) => handler({ type: event, ...payload }, sessionCtx(sessionId, hasUI))));
 }
 
-/** Pi 0.99.1's emitBeforeAgentStart (extensions/runner.js): runs every
- *  before_agent_start handler and collects the messages they return. */
-async function beforeAgentStart(pi, sessionId, prompt) {
-	const results = await emit(pi, "before_agent_start", sessionId, { prompt, images: undefined, systemPrompt: "", systemPromptOptions: {} });
+/** Pi 1.0.0's prompt path (agent-session.js): the input event with where the
+ *  prompt came from (by default typed in the TUI), then every
+ *  before_agent_start handler, collecting the messages they return. */
+async function beforeAgentStart(pi, sessionId, prompt, { source = "interactive", hasUI = true } = {}) {
+	await emit(pi, "input", sessionId, { text: prompt, source }, hasUI);
+	const results = await emit(pi, "before_agent_start", sessionId, { prompt, images: undefined, systemPrompt: "", systemPromptOptions: {} }, hasUI);
 	for (const result of results) assert.equal(result?.systemPrompt, undefined, "a notice never changes the system prompt");
 	return results.filter((result) => result?.message).map((result) => result.message);
 }
@@ -347,5 +349,33 @@ describe("agent notices", () => {
 		const told = await beforeAgentStart(pi, owner, "next question");
 		assert.deepEqual(told.map((message) => message.details), [{ kinds: ["steering_query_ended_during_write"] }], "the late anomaly reaches the Pi session");
 		assert.deepEqual(await beforeAgentStart(pi, forkId, "next question"), [], "nothing is queued under the released fork's id");
+	});
+
+	it("tells only a session a person types into, with what this process's subagent sessions hit marked as theirs, once per kind", { timeout: 20_000 }, async () => {
+		userConfig({ agentNotices: true });
+		const pi = fakePi();
+		debugBridge.default(pi);
+		// How each kind of subagent's prompt reaches Pi's input event.
+		const inProcess = { source: "interactive", hasUI: false };
+		const subagents = [["notice-in-process", inProcess], ["notice-rpc", { source: "rpc", hasUI: true }], ["notice-herdr", { source: "extension", hasUI: true }]];
+		for (const [sessionId, how] of subagents) {
+			await beforeAgentStart(pi, sessionId, "task", how);
+			runInRequestLane(sessionId, () => noteAnomaly("empty_prompt"));
+			assert.deepEqual(await beforeAgentStart(pi, sessionId, "more", how), [], `${sessionId} is told nothing`);
+		}
+		runInRequestLane("notice-person", () => noteAnomaly("stream_idle_timeout"));
+		const [message] = await beforeAgentStart(pi, "notice-person", "a typed question");
+		assert.deepEqual(message.details, { kinds: ["stream_idle_timeout"], subagentKinds: ["empty_prompt"] });
+		const lines = message.content.split("\n");
+		assert.equal(lines[0], "Claude bridge: 2 anomalies since your last message.");
+		assert.equal(lines[2], "- In a subagent: A query started without any prompt text; the bridge sent a placeholder prompt (empty_prompt; the bridge recovered)");
+
+		// This subagent starts while the switch is off.
+		userConfig({});
+		await beforeAgentStart(pi, "notice-later", "task", inProcess);
+		userConfig({ agentNotices: true });
+		runInRequestLane("notice-later", () => { noteAnomaly("empty_prompt"); noteAnomaly("tool_call_dead"); });
+		const [next] = await beforeAgentStart(pi, "notice-person", "an intercom message", { source: "extension", hasUI: true });
+		assert.deepEqual(next.details, { kinds: [], subagentKinds: ["tool_call_dead"] }, "a program's prompt to a person's session carries it; a subagent kind is told once");
 	});
 });
