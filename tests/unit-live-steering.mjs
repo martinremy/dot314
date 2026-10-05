@@ -459,5 +459,6 @@ it("a steer whose query ended during the write reaches Claude once, through the 
 	const imported = readFileSync(openSession({ sessionId: resumed, projectPath: process.cwd(), claudeDir: root }).jsonlPath, "utf8");
 	const delivered = [...observed.prompts, imported].join("\n");
 	assert.equal(delivered.split("STEER-ENDED-WRITE").length - 1, 1, `the steer reaches Claude exactly once: prompts=${JSON.stringify(observed.prompts)}`);
-	assert.deepEqual(observed.prompts, ["next"]);
+	// With the prompt after it, not left unanswered at the end of the import.
+	assert.deepEqual(observed.prompts, ["STEER-ENDED-WRITE\n\nnext"]);
 });

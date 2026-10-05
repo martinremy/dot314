@@ -30,6 +30,9 @@ const NOTICE_1 = "Background task 1 finished: build passed.";
 const NOTICE_2 = "Background task 1 exited with code 0.";
 const MODEL_ID = "claude-haiku-4-5";
 const MODEL = { id: MODEL_ID, api: "claude-bridge", provider: "pi-claude", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+// The record that ends a transcript left on a tool result: Claude Code leaves
+// it out of the request instead of answering with "No response requested.".
+const VIRTUAL = ["assistant", ["text"]];
 
 let root;
 let cwd;
@@ -107,8 +110,10 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.deepEqual(chain.slice(kept.length).map(shape), [
 			["assistant", ["thinking", "tool_use:toolu_fixture_3"]],
 			["user", ["tool_result:toolu_fixture_3"]],
+			VIRTUAL,
 		], "then Pi's aborted turn, chained from the last attachment");
-		assert.deepEqual(chain.at(-1).message.content[0], { type: "tool_result", tool_use_id: "toolu_fixture_3", content: "Command aborted", is_error: true });
+		assert.deepEqual(chain.at(-2).message.content[0], { type: "tool_result", tool_use_id: "toolu_fixture_3", content: "Command aborted", is_error: true });
+		assert.equal(chain.at(-1).isVirtual, true);
 		assert.equal(readFileSync(old.path, "utf8"), old.text, "the old transcript is never written: its child may still be");
 		const record = getSharedSession();
 		assert.equal(record.sessionId, result.sessionId);
@@ -136,6 +141,7 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 			["user", "Run sleep 40."],
 			["assistant", ["thinking", "tool_use:toolu_fixture_3"]],
 			["user", ["tool_result:toolu_fixture_3"]],
+			VIRTUAL,
 		]);
 		assert.equal(chain[kept.length + 1].message.content[0].content, "uno\n", "the differing result is Pi's");
 	});
@@ -197,7 +203,21 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.deepEqual(chain.slice(kept.length).map(shape), [
 			["assistant", ["thinking", "tool_use:toolu_fixture_3"]],
 			["user", ["tool_result:toolu_fixture_3"]],
+			VIRTUAL,
 		], "then only Pi's aborted turn");
+	});
+
+	it("forks past a prompt whose run holds a reply cut off by Esc", async () => {
+		const old = writeOldTranscript(claudeDir, { prompt2: `${NOTICE_1}\n\n[Request interrupted by user]\n\n${NOTICE_2}` });
+		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
+		const cutOff = { role: "assistant", provider: "pi-claude", api: "anthropic", model: MODEL_ID, stopReason: "aborted", content: [], timestamp: 0 };
+
+		const result = await syncSharedSession([...piPriors({ prompt2: [NOTICE_1, cutOff, NOTICE_2] }), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
+
+		assert.equal(result.sync.forked, 9, "Claude Code's one prompt record covers the run, the cut-off reply included");
+		const chain = mainChain(sessionRecords(result.sessionId));
+		const kept = nativeThrough(old.records, old.coveredEnd);
+		assert.deepEqual(chain.slice(0, kept.length).map(rendered), kept.map(rendered));
 	});
 
 	for (const [what, priors] of [
@@ -308,14 +328,14 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 
 		assert.equal(result.sync.forked, 1, "only the prompt before the reply is copied");
 		const chain = mainChain(sessionRecords(result.sessionId));
-		assert.equal(chain.some((record) => record.type === "assistant"), false, "the cut-off reply is not replayed");
-		assert.match(JSON.stringify(chain.at(-1).message.content), /could not be replayed as-is/);
+		assert.equal(chain.some((record) => record.type === "assistant" && record.isVirtual !== true), false, "the cut-off reply is not replayed");
+		assert.match(JSON.stringify(chain.at(-2).message.content), /could not be replayed as-is/);
 	});
 
 	it("imports all of Pi's history when the transcript shares no prefix with it or is gone", async () => {
 		const fullImport = (records) => {
 			assert.ok(records.every((record) => (record.type === "user" || record.type === "assistant") && record.forkedFrom === undefined), "nothing of Claude Code's transcript is kept");
-			assert.deepEqual(records.map(shape).map(([type]) => type), ["user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant", "user"]);
+			assert.deepEqual(records.map(shape).map(([type]) => type), ["user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant"]);
 		};
 		writeOldTranscript();
 		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
@@ -372,7 +392,7 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.equal(result.sync.forked, undefined);
 		const records = sessionRecords(result.sessionId);
 		assert.ok(records.every((record) => record.forkedFrom === undefined && record.type !== "attachment"));
-		assert.equal(records.length, 9);
+		assert.equal(records.length, 10);
 		assert.equal(getSharedSession().sessionId, result.sessionId);
 	});
 

@@ -276,7 +276,7 @@ describe("compaction while Claude waits for a Pi tool result", () => {
 			await waitFor(() => ctx().activeQuery === null);
 			onPiHistoryReplaced("session_compact");
 			assert.equal(__testGetBridgeIntegrityState().sharedSession?.forceRotate, undefined);
-			await collect(streamClaudeAgentSdk(model, { messages: [system, user("summary"), user("next prompt")] }, { cwd: root }));
+			await collect(streamClaudeAgentSdk(model, { messages: [system, user("summary"), runEcho, toolCall, toolResult, user("next prompt")] }, { cwd: root }));
 			assert.equal(calls[1].options.resume, sessionId);
 		});
 	});
@@ -298,7 +298,10 @@ describe("compaction while Claude waits for a Pi tool result", () => {
 			assert.equal(continuation.closed, true);
 			assert.equal(calls.length, 3);
 			assert.notEqual(calls[2].options.resume, sessionId);
-			assert.equal(importedMessages(root, calls[2].options.resume).filter((message) => message.content === "steer two").length, 1);
+			// The restart's prompt carries the steer ahead of its own text, so the
+			// import does not end on it.
+			assert.equal(importedMessages(root, calls[2].options.resume).filter((message) => message.content === "steer two").length, 0);
+			assert.ok(calls[2].prompt.startsWith("steer two\n\n"), calls[2].prompt);
 			assert.equal(continued.filter((event) => event.type === "done").length, 1);
 		}, undefined, false, abandoningQuery);
 	});
@@ -318,7 +321,10 @@ describe("compaction while Claude waits for a Pi tool result", () => {
 			assert.equal(continuation.closed, true);
 			assert.equal(calls.length, 3);
 			assert.equal(result.filter((event) => event.type === "done").length, 1);
-			assert.equal(importedMessages(root, calls[2].options.resume).filter((message) => message.content === "steer two").length, 1);
+			// The restart's prompt carries the steer ahead of its own text, so the
+			// import does not end on it.
+			assert.equal(importedMessages(root, calls[2].options.resume).filter((message) => message.content === "steer two").length, 0);
+			assert.ok(calls[2].prompt.startsWith("steer two\n\n"), calls[2].prompt);
 		}, undefined, false, abandoningQuery);
 	});
 

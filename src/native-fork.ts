@@ -23,7 +23,7 @@ import { getSessionPath } from "cc-session-io";
 import { readFileSync } from "fs";
 import { isDeepStrictEqual } from "node:util";
 import { isChildExecutedTool } from "./connectors.ts";
-import { PROVIDER_ID, convertPiMessages, sanitizeToolId, toolResultContentToAnthropic, unreplayableTrailingTurns, userMessageToAnthropic } from "./convert.ts";
+import { PROVIDER_ID, convertPiMessages, isSkippedAssistant, sanitizeToolId, toolResultContentToAnthropic, unreplayableTrailingTurns, userMessageToAnthropic } from "./convert.ts";
 import { debug } from "./debug.ts";
 import { toolResultToMcpContent } from "./extract-tool-results.ts";
 import { isPiDispatchable, mapToolArgs, mapToolName } from "./tool-mapping.ts";
@@ -250,10 +250,6 @@ function importedBlockMatches(native: unknown, expected: Record<string, unknown>
 	}
 }
 
-function isSkippedAssistant(message: PiMessage): boolean {
-	return message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
-}
-
 /** Where a matched group ends in the chain. */
 interface GroupMatch {
 	/** Index of the Pi message after the group. */
@@ -367,13 +363,14 @@ export function planNativePrefix(
 		if (!record || record.type !== "user" || record.isMeta === true) return undefined;
 		const content = recordMessage(record).content;
 		if (Array.isArray(content) && content.some((block) => isObject(block) && block.type === "tool_result")) return undefined;
-		if (promptMatches(record, priors[index])) return trailing(at + 1, at, index + 1);
-		// A prompt the bridge built from several of Pi's user messages in a
-		// row (session-persistence.ts planIncrementalPromptBatch): the batch
-		// runs from the prompt's start to the end of Pi's context, so it is
-		// the whole run of user messages, and Pi's next message is the reply.
+		if (priors[index].role === "user" && promptMatches(record, priors[index])) return trailing(at + 1, at, index + 1);
+		// A prompt the bridge built from a run of Pi's messages: several user
+		// messages in a row (session-persistence.ts planIncrementalPromptBatch),
+		// or ones with a failed or cut-off reply among them (user-prompt.ts
+		// promptRunStart). The run reaches the end of that request's context,
+		// so it is the whole run, and Pi's next message is the reply.
 		let end = index;
-		while (end < priors.length && priors[end].role === "user") end++;
+		while (end < priors.length && (priors[end].role === "user" || isSkippedAssistant(priors[end]))) end++;
 		if (end - index < 2 || end === priors.length || !sameContent(content, [promptForm(priors.slice(index, end))])) return undefined;
 		return trailing(at + 1, at, end);
 	};
@@ -469,23 +466,25 @@ export function planNativePrefix(
 	const limit = unreplayable.size > 0 ? Math.min(...unreplayable) : priors.length;
 	while (index < limit) {
 		const message = priors[index];
-		// What the import writes nothing for: a failed or aborted reply with its
-		// results, and anything that is not a conversation message. It counts
-		// as covered only once a group after it matches.
-		if (isSkippedAssistant(message)) {
-			index++;
-			while (index < priors.length && priors[index].role === "toolResult") index++;
-			continue;
-		}
 		if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
 			index++;
 			continue;
 		}
 		let start = position;
 		while (start < chain.length && isLeadingCarry(chain[start])) start++;
-		const group = message.role === "user" ? matchPrompt(start, index)
+		// A failed or cut-off reply can open a prompt run (user-prompt.ts
+		// promptRunStart).
+		const group = message.role === "user" || isSkippedAssistant(message) ? matchPrompt(start, index)
 			: message.role === "assistant" ? matchTurn(start, index)
 			: undefined;
+		// What the import writes nothing for otherwise: a failed or aborted
+		// reply with its results. It counts as covered only once a group after
+		// it matches.
+		if (!group && isSkippedAssistant(message)) {
+			index++;
+			while (index < priors.length && priors[index].role === "toolResult") index++;
+			continue;
+		}
 		if (!group) break;
 		index = group.next;
 		ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched });

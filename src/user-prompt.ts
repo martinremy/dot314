@@ -5,8 +5,37 @@
 
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import type { Context } from "@earendil-works/pi-ai";
-import { messageContentToText } from "./convert.ts";
+import { isSkippedAssistant, messageContentToText } from "./convert.ts";
 import { debug } from "./debug.ts";
+
+/** Claude Code's own record of an Esc that cut off a reply. */
+export const INTERRUPTED_MARKER = "[Request interrupted by user]";
+
+/** Where the prompt of a query that sends Pi's whole context starts: the
+ *  trailing user messages, with any reply among them that failed or was cut
+ *  off by Esc. The import drops such a reply (convert.ts isSkippedAssistant),
+ *  so as history the unanswered message before it would end Claude Code's
+ *  transcript, and Claude Code resumes a transcript that ends on a user
+ *  message with a synthetic "No response requested." reply, which Claude
+ *  reads as its own. In the prompt, a cut-off reply reads as Claude Code's
+ *  own record of the Esc. */
+export function promptRunStart(messages: Context["messages"]): number {
+	let start = messages.length - 1;
+	if (messages[start]?.role !== "user") return start;
+	while (start > 0 && (messages[start - 1].role === "user" || isSkippedAssistant(messages[start - 1]))) start--;
+	return start;
+}
+
+/** The content each message of a prompt run contributes, in order: a user
+ *  message's own, INTERRUPTED_MARKER for a reply cut off by Esc, nothing for
+ *  a failed one. Null when the run holds no user message or anything that
+ *  belongs in history. */
+function promptParts(messages: Context["messages"]): Array<string | Extract<Context["messages"][number], { role: "user" }>["content"]> | null {
+	if (!messages.some((message) => message.role === "user")) return null;
+	if (messages.some((message) => message.role !== "user" && !isSkippedAssistant(message))) return null;
+	return messages.flatMap((message) =>
+		message.role === "user" ? [message.content] : message.role === "assistant" && message.stopReason === "aborted" ? [INTERRUPTED_MARKER] : []);
+}
 
 /** Whether Claude Code would read `content` as one of its own slash commands:
  *  a fresh prompt then runs the command and never reaches Claude, and a
@@ -20,7 +49,7 @@ export function slashLed(content: string | ContentBlockParam[]): boolean {
 	return texts.some((text) => text.trimStart().startsWith("/"));
 }
 
-/** Combine one or more consecutive user messages into a single SDK prompt.
+/** Combine a prompt run (promptRunStart) into a single SDK prompt.
  *
  *  Representation divergence, accepted on purpose: this MERGES N pi user
  *  messages into ONE Claude user record ("\n\n"-joined), while a REBUILD
@@ -32,23 +61,23 @@ export function slashLed(content: string | ContentBlockParam[]): boolean {
  *  the merged record when it equals this join of Pi's whole run of user
  *  messages, and imports Pi's messages after it as separate records. */
 export function extractUserPrompt(messages: Context["messages"]): string | null {
-	if (messages.length === 0 || messages.some((message) => message.role !== "user")) return null;
-	return messages.map((message) =>
-		typeof message.content === "string" ? message.content : messageContentToText(message.content) || "",
-	).join("\n\n");
+	const parts = promptParts(messages);
+	if (!parts) return null;
+	return parts.map((content) => typeof content === "string" ? content : messageContentToText(content) || "").join("\n\n");
 }
 
 /** Combine consecutive user messages as ContentBlockParam[] while preserving images.
  *  Returns null if no images — caller should fall back to the string prompt.
  *  Same N-into-1 merge as extractUserPrompt (see its comment for why). */
 export function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockParam[] | null {
-	if (messages.length === 0 || messages.some((message) => message.role !== "user")) return null;
+	const parts = promptParts(messages);
+	if (!parts) return null;
 
 	let hasImage = false;
 	const blocks: ContentBlockParam[] = [];
-	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-		const content = messages[messageIndex].content;
-		if (messageIndex > 0) blocks.push({ type: "text", text: "\n\n" });
+	for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+		const content = parts[partIndex];
+		if (partIndex > 0) blocks.push({ type: "text", text: "\n\n" });
 		if (typeof content === "string") {
 			if (content) blocks.push({ type: "text", text: content });
 			continue;

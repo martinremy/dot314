@@ -181,6 +181,7 @@ Upstream here is the bridge in dot314, whose changes this fork merges. Everythin
 - Before reusing Claude's session, the bridge checks with a digest that it still matches Pi's history, and rebuilds it when Pi rewrote history Claude already holds.
 - A rebuild replays redacted thinking correctly, and imports a latest Claude turn whose thinking cannot be replayed as a note of what it said and did.
 - Claude Code never resumes a rebuilt session as an interrupted turn, so no "Continue from where you left off." prompt is injected.
+- After you press Esc, Claude never sees a "No response requested." reply it did not write. Claude Code adds one when it resumes a session that ends on your message or a tool result, and a rebuilt session never ends that way.
 
 **System prompt**
 - When Anthropic rejects a request as a third-party app (its system prompt carries both of Pi's clauses `custom providers (docs/custom-provider.md)` and `pi packages (docs/packages.md)`), the error keeps Anthropic's text and adds a hint that names the clauses and the fix (see Settings).

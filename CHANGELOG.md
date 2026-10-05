@@ -2,6 +2,14 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-04
+
+### Fixed
+
+- **After an Esc, Claude saw a "No response requested." reply it never wrote.**
+  - **Before:** Pi drops a reply cut off by Esc, so the rebuild that follows left your unanswered message, or the aborted tool's result, last in Claude Code's transcript. Claude Code resumes such a transcript by inserting a synthetic "No response requested." reply. Claude read it as its own and now and then answered a later prompt with that exact line. When you resent a message after an Esc, Claude also got it twice, once before the fake reply and once after.
+  - **Now:** everything after Claude's last real reply goes in the prompt, with Claude Code's own `[Request interrupted by user]` where the reply was cut off. A rebuild that still ends on a tool result gets a placeholder that Claude Code leaves out of the request, so the result and your next message reach Claude together, as Pi's own Anthropic provider sends them.
+
 ## 2026-10-03
 
 ### Changed

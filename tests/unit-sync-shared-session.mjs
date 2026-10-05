@@ -19,6 +19,7 @@ import { getSessionPath, parseJsonlFile } from "cc-session-io";
 import { historyDigest } from "../src/history-digest.js";
 import { __testGetBridgeIntegrityState, setSharedSession } from "../src/bridge-state.js";
 import { findUnpairedToolUses } from "../src/tool-pairing-audit.js";
+import { extractUserPrompt } from "../src/user-prompt.js";
 
 const user = (text) => ({ role: "user", content: text });
 const assistant = () => ({ role: "assistant", content: [] });
@@ -369,10 +370,14 @@ describe("syncSharedSession foreign-conversation guard (#1001)", () => {
 // Claude turn with an unsigned thinking block removed. It imports a note of
 // what the turn said and did instead.
 describe("syncSharedSession REBUILD import of a turn it cannot replay exactly", () => {
-	/** The rebuilt session's user and assistant records, as [type, content]. */
-	const importedRecords = (sessionId, cwd, claudeDir) => parseJsonlFile(getSessionPath(sessionId, cwd, claudeDir))
-		.filter((record) => record.type === "user" || record.type === "assistant")
+	const turnRecords = (sessionId, cwd, claudeDir) => parseJsonlFile(getSessionPath(sessionId, cwd, claudeDir))
+		.filter((record) => record.type === "user" || record.type === "assistant");
+	/** The rebuilt session's user and assistant records, as [type, content],
+	 *  without the virtual record that ends a session left on a note. */
+	const importedRecords = (sessionId, cwd, claudeDir) => turnRecords(sessionId, cwd, claudeDir)
+		.filter((record) => record.isVirtual !== true)
 		.map((record) => [record.type, record.message.content]);
+	const endsOnVirtualRecord = (sessionId, cwd, claudeDir) => turnRecords(sessionId, cwd, claudeDir).at(-1).isVirtual === true;
 	const shape = (content) => typeof content === "string"
 		? content
 		: content.map((block) => block.type === "tool_result" ? `tool_result:${block.tool_use_id}` : block.type === "tool_use" ? `tool_use:${block.id}` : block.type);
@@ -403,6 +408,7 @@ describe("syncSharedSession REBUILD import of a turn it cannot replay exactly", 
 				assert.ok(note.includes('write with arguments {"path":"notes.md","content":"x"}'), note);
 				assert.ok(note.includes("Wrote notes.md"), note);
 				assert.ok(!note.includes("cut off mid-thought"), "thinking is not carried");
+				assert.ok(endsOnVirtualRecord(first.sessionId, cwd, claudeDir), "Claude Code does not answer the note with a reply of its own");
 
 				// Claude holds the turn's content, so the digest may vouch for it.
 				const record = __testGetBridgeIntegrityState().sharedSession;
@@ -450,6 +456,39 @@ describe("syncSharedSession REBUILD import of a turn it cannot replay exactly", 
 				assert.deepEqual(findUnpairedToolUses(imported.map(([type, content]) => ({ role: type, content }))), []);
 				const note = noteText(imported[3][1]);
 				assert.ok(note.includes('read with arguments {"path":"b"}') && note.includes("b body"), note);
+				assert.ok(endsOnVirtualRecord(result.sessionId, cwd, claudeDir));
+			} finally {
+				rmSync(cwd, { recursive: true, force: true });
+			}
+		});
+	});
+});
+
+describe("syncSharedSession REBUILD after replies that failed or were cut off by Esc", () => {
+	it("prompts every message since Claude's last reply, so the import ends on that reply", () => {
+		withTempClaudeDir((claudeDir) => {
+			const cwd = mkdtempSync(join(tmpdir(), "bridge-sync-cwd-"));
+			try {
+				const messages = [
+					user("first"),
+					{ ...assistantText("answer"), stopReason: "stop" },
+					user("second"),
+					{ role: "assistant", content: [], stopReason: "aborted" },
+					user("third"),
+					{ role: "assistant", content: [], stopReason: "error", errorMessage: "overloaded" },
+					user("fourth"),
+				];
+
+				const result = syncSharedSession(messages, cwd);
+
+				assert.equal(result.promptStart, 2);
+				assert.equal(extractUserPrompt(messages.slice(result.promptStart)), "second\n\n[Request interrupted by user]\n\nthird\n\nfourth");
+				const records = parseJsonlFile(getSessionPath(result.sessionId, cwd, claudeDir))
+					.filter((record) => record.type === "user" || record.type === "assistant");
+				assert.deepEqual(records.map((record) => [record.type, record.message.content]), [
+					["user", "first"],
+					["assistant", [{ type: "text", text: "answer" }]],
+				]);
 			} finally {
 				rmSync(cwd, { recursive: true, force: true });
 			}

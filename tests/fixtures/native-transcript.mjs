@@ -33,7 +33,8 @@ const result = (toolCallId, toolName, text, isError = false) => ({ role: "toolRe
  *  result's text `result4` replaces; `steer` adds the user message Pi sent
  *  while that turn's calls ran, after their results. `prompt2` lists the
  *  texts of the user messages in a row that Pi holds for the second prompt,
- *  each a text block as Pi's convertToLlm makes of an extension's message. */
+ *  each a text block as Pi's convertToLlm makes of an extension's message,
+ *  or a message Pi holds among them as it is. */
 export function piPriors({ prompt1 = PROMPT_1, result1 = "one\n", signature1 = "sig-a1", parallel = false, result4 = "two\n", steer, prompt2 } = {}) {
 	return [
 		user(prompt1),
@@ -48,7 +49,7 @@ export function piPriors({ prompt1 = PROMPT_1, result1 = "one\n", signature1 = "
 			...(steer ? [user(steer)] : []),
 		] : []),
 		claude("stop", [thinking("Done.", "sig-a2"), { type: "text", text: "DONE" }]),
-		...(prompt2 ? prompt2.map((text) => user([{ type: "text", text }])) : [user(PROMPT_2)]),
+		...(prompt2 ? prompt2.map((text) => typeof text === "string" ? user([{ type: "text", text }]) : text) : [user(PROMPT_2)]),
 		claude("toolUse", [thinking("Sleep.", "sig-a3"), bash("toolu_fixture_3", "sleep 40")]),
 		result("toolu_fixture_3", "bash", "Command aborted", true),
 	];

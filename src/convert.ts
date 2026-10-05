@@ -126,7 +126,7 @@ function isClaudeAssistant(msg: PiMessage): msg is AssistantMessage {
 	return msg.role === "assistant" && (msg.provider === PROVIDER_ID || msg.api === "anthropic");
 }
 
-function isSkippedAssistant(msg: PiMessage): boolean {
+export function isSkippedAssistant(msg: PiMessage): boolean {
 	return msg.role === "assistant" && (msg.stopReason === "error" || msg.stopReason === "aborted");
 }
 

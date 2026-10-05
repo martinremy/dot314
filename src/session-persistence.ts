@@ -12,6 +12,7 @@ import { UNVERIFIED_HISTORY_DIGEST, historyDigest, sharedHistoryMatches } from "
 import { forkNativePrefix, planNativePrefix, type ForkedPrefix, type NativePrefix } from "./native-fork.ts";
 import { stepEnd, stepStart, type SyncTiming } from "./request-timing.ts";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.ts";
+import { INTERRUPTED_MARKER, promptRunStart } from "./user-prompt.ts";
 import {
 	findUnpairedToolUses,
 	insertLostToolResultPlaceholders,
@@ -589,7 +590,10 @@ export function syncSharedSession(
 	options: SyncOptions = {},
 ): SyncResult | Promise<SyncResult> {
 	const sharedSession = getSharedSession();
-	const priorMessages = messages.slice(0, -1); // everything before the current user prompt
+	// Everything before this query's prompt. A rebuild imports it and the
+	// prompt delivers the rest (user-prompt.ts promptRunStart).
+	const promptStart = promptRunStart(messages);
+	const priorMessages = messages.slice(0, promptStart);
 	const accountProfileId = account?.accountProfileId;
 	const scopeConfigDir = account?.claudeConfigDir; // resolved dir for managed, undefined for legacy
 	// What cc-session-io reads/writes. Managed requests always carry a resolved
@@ -696,7 +700,7 @@ export function syncSharedSession(
 	if (priorMessages.every((message) => message.role === "system")) {
 		debug(`Case 1: clean start, ${messages.length} total messages, account=${accountProfileId ?? "default"}`);
 		debug(`syncResult: path=clean-start cause=clean-start${mark ? ` mark=${mark}` : ""}`);
-		return { sessionId: null, promptStart: messages.length - 1, sync: { path: "clean-start", cause: "clean-start", ...(mark ? { mark } : {}) } };
+		return { sessionId: null, promptStart, sync: { path: "clean-start", cause: "clean-start", ...(mark ? { mark } : {}) } };
 	}
 	const replacedSessionId = sharedSession?.sessionId;
 	// Preserve a UUID only within the same credential profile: reusing account
@@ -720,7 +724,7 @@ export function syncSharedSession(
 		if ("prefix" in plan) {
 			return rebuildFromNativePrefix(plan.prefix, {
 				messages, cwd, customToolNameToSdk, modelId, account, options,
-				sharedSession: sharedSession!, claudeDir, preserveId, cause, mark, previousCursor, incomingFingerprint,
+				sharedSession: sharedSession!, claudeDir, preserveId, cause, mark, previousCursor, incomingFingerprint, promptStart,
 			});
 		}
 		debug(`Case 4: no native prefix to fork from ${previousSessionId.slice(0, 8)} (${plan.reason}) — importing all ${priorMessages.length} pi msgs`);
@@ -737,6 +741,7 @@ export function syncSharedSession(
 		...(modelId ? { model: modelId } : {}),
 	});
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
+	endOnAssistant(session);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd, claudeDir);
 	stepEnd("rebuildWrite", writeStarted);
@@ -766,9 +771,24 @@ export function syncSharedSession(
 	debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${replacedSessionId === undefined ? "first" : !sameAccount ? "account-rotated" : preserveId ? "preserved" : "rotated-post-abort"} cause=${cause}${mark ? ` mark=${mark}` : ""} missed=${missed}`);
 	return {
 		sessionId: session.sessionId,
-		promptStart: messages.length - 1,
+		promptStart,
 		sync: { path: "rebuild", cause, ...(mark ? { mark } : {}), priors: priorMessages.length, missed },
 	};
+}
+
+/** Ends a rebuilt transcript on an assistant record where it would end on a
+ *  user-side one (a tool result, an imported note). Claude Code resumes such
+ *  a transcript with a synthetic "No response requested." reply, which Claude
+ *  reads as its own. Claude Code (2.1.288) leaves a virtual assistant record
+ *  out of the request, so Claude gets the tool result and this query's prompt
+ *  as one user turn, as Pi's own Anthropic provider sends them.
+ *  tests/int-esc-resume.mjs checks that against the installed Claude Code.
+ *  `before` holds the records that precede the session's own (a fork's). */
+function endOnAssistant(session: ReturnType<typeof createSession>, before: readonly JsonlRecord[] = []): void {
+	const turns = [...before, ...session.records].filter((record) => record.type === "user" || record.type === "assistant");
+	if (turns.at(-1)?.type !== "user") return;
+	session.addAssistantMessage([{ type: "text", text: INTERRUPTED_MARKER }], { model: "<synthetic>" });
+	Object.assign(session.records.at(-1)!, { isVirtual: true });
 }
 
 /** Writes a session file that must not exist yet: the fork's id is new, and
@@ -805,6 +825,7 @@ interface ForkRebuildContext {
 	mark?: string;
 	previousCursor: number;
 	incomingFingerprint?: string;
+	promptStart: number;
 }
 
 /**
@@ -821,7 +842,7 @@ interface ForkRebuildContext {
  * by another program, and a full import is today's correct result.
  */
 async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildContext): Promise<SyncResult> {
-	const priorMessages = c.messages.slice(0, -1);
+	const priorMessages = c.messages.slice(0, c.promptStart);
 	const oldId = prefix.oldSessionId.slice(0, 8);
 	const replan = (why: string): SyncResult => {
 		debug(`Case 4: ${why} — syncing again without a fork`);
@@ -839,7 +860,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		debug(`syncResult: path=rebuild cancelled cause=${c.cause}${c.mark ? ` mark=${c.mark}` : ""}`);
 		return {
 			sessionId: null,
-			promptStart: c.messages.length - 1,
+			promptStart: c.promptStart,
 			cancelled: true,
 			sync: { path: "rebuild", cause: c.cause, ...(c.mark ? { mark: c.mark } : {}), priors: priorMessages.length },
 		};
@@ -858,6 +879,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		...(c.modelId ? { model: c.modelId } : {}),
 	});
 	if (tail.length > 0) convertAndImportMessages(session, tail, c.customToolNameToSdk, c.cwd);
+	endOnAssistant(session, forked.entries as JsonlRecord[]);
 	// The import starts a chain of its own. It must hang off the fork's leaf,
 	// which is often an attachment: chained from the last message instead, the
 	// attachments after it would fall off the chain and out of the request.
@@ -901,7 +923,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 	debug(`syncResult: path=rebuild sessionId=${forked.sessionId} priors=${priorMessages.length} ${c.preserveId ? "preserved" : "rotated-post-abort"} cause=${c.cause}${c.mark ? ` mark=${c.mark}` : ""} missed=${missed} forked=${prefix.piCount} from=${oldId} forkedRecords=${forked.entries.length} appended=${appended}`);
 	return {
 		sessionId: forked.sessionId,
-		promptStart: c.messages.length - 1,
+		promptStart: c.promptStart,
 		sync: { path: "rebuild", cause: c.cause, ...(c.mark ? { mark: c.mark } : {}), priors: priorMessages.length, missed, forked: prefix.piCount },
 	};
 }
