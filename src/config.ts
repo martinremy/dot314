@@ -199,10 +199,24 @@ export const PI_DEFAULT_PREAMBLE = "You are an expert coding assistant operating
  * no evidence, since a replayed patch keeps old positions and extensions may
  * name sections `tools`, `rules` or `docs`. A content-only prompt (a
  * before_agent_start forced prompt) is Pi's rendered prompt plus a hook's
- * text, so it has Pi's default base when it starts with that preamble.
+ * text, so it has Pi's default base when it starts with that preamble, or
+ * when a hook put its text in front of it (piBaseAfterHookText).
  */
 function hasPiDefaultBase(prompt: string, preamble: string | undefined): boolean {
 	return preamble !== undefined ? preamble === PI_DEFAULT_PREAMBLE : prompt.startsWith(PI_DEFAULT_PREAMBLE);
+}
+
+/** Where Pi's rendered default base starts in a content-only prompt that a
+ *  before_agent_start hook prefixed with its own text (pi-subagents puts its
+ *  child instructions there), or undefined. The base is Pi's preamble opening
+ *  a paragraph, directly followed by Pi's tools section as Pi renders it, with
+ *  Pi's docs section later, so a prompt that only quotes the sentence is not
+ *  taken for it. */
+function piBaseAfterHookText(prompt: string): number | undefined {
+	const at = prompt.indexOf(`\n\n${PI_DEFAULT_PREAMBLE}${PI_TOOLS_BLOCK.open}`);
+	if (at === -1) return undefined;
+	const base = prompt.slice(at + 2);
+	return piBlockRange(base, PI_TOOLS_BLOCK)?.[0] === PI_DEFAULT_PREAMBLE.length && piBlockRange(base, PI_DOCS_BLOCK) ? at + 2 : undefined;
 }
 
 /**
@@ -225,6 +239,13 @@ function hasPiDefaultBase(prompt: string, preamble: string | undefined): boolean
 export function resolveSystemPrompt(prompt: string, modelKey: string, config: SystemPromptConfig = {}, preamble?: string): string {
 	const replacement = `${config.includeModelLine ? `Active model: ${modelKey}\n\n` : ""}${config.replacement ?? ""}`.trim();
 	if (!replacement) return prompt;
+	const base = preamble === undefined && !prompt.startsWith(PI_DEFAULT_PREAMBLE) ? piBaseAfterHookText(prompt) : undefined;
+	if (base !== undefined) {
+		// The hook's text takes the place of Pi's preamble, after the
+		// replacement; preservePiContext false sends the replacement alone.
+		const resolved = resolveSystemPrompt(prompt.slice(base), modelKey, config);
+		return config.preservePiContext === false ? resolved : `${replacement}\n\n${prompt.slice(0, base - 2)}${resolved.slice(replacement.length)}`;
+	}
 	if (!hasPiDefaultBase(prompt, preamble)) {
 		if (prompt === replacement || prompt.startsWith(`${replacement}\n`)) return prompt;
 		return prompt ? `${replacement}\n\n${prompt}` : replacement;

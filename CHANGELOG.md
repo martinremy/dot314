@@ -2,6 +2,14 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-05
+
+### Fixed
+
+- **A subagent whose prompt adds to Pi's default one was refused as a third-party app.**
+  - **Before:** the replacement looked for Pi's default prompt only at the very start. pi-subagents puts its child instructions in front of Pi's prompt, so for an agent with `systemPromptMode: append` (the `delegate` agent) the bridge kept Pi's prompt whole, documentation line included, and Anthropic answered every request with "Third-party apps now draw from your extra usage".
+  - **Now:** Pi's default base is also recognized behind a hook's leading text, when Pi's opening sentence starts a paragraph, Pi's tool list comes right after it, and Pi's documentation section follows. The replacement takes the place of Pi's opening, tools and docs as usual, and the hook's text follows the replacement.
+
 ## 2026-10-04
 
 ### Fixed

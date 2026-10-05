@@ -319,6 +319,32 @@ describe("systemPrompt replacement over Pi's default base", () => {
 	});
 
 	// Review finding 2B: without Pi's docs line the forced prompt still renders Pi's default base.
+	// pi-subagents' child hook puts its instructions in front of Pi's prompt.
+	it("replaces the default base behind a before_agent_start hook's leading text, and keeps that text", { timeout: 10_000 }, async () => {
+		const HOOK = "You are a child subagent, not the parent orchestrator.\nDo not delegate.";
+		for (const options of [DEFAULT_BASES["a pi-subagents append-mode agent (the addendum)"], DEFAULT_BASES["default base"]]) {
+			const base = sessionMessages(options);
+			const sections = getCurrentSystemMessage(base).sections;
+			const messages = await forcedMessages(base, `${HOOK}\n\n${getCurrentSystemPrompt(base)}`);
+			const kept = Object.entries(sections).filter(([name]) => !["preamble", "tools", "docs"].includes(name)).map(([, text]) => text);
+			for (const [label, { config, head }] of Object.entries(CONFIGS)) {
+				assert.equal(sent(messages, config), config.preservePiContext === false ? head : [head, HOOK, ...kept].join("\n\n"), label);
+			}
+		}
+	});
+
+	it("keeps a prompt whole that quotes Pi's preamble without Pi's tools section after it, even with Pi's docs section later", { timeout: 10_000 }, async () => {
+		const base = sessionMessages({ contextFiles });
+		const docs = getCurrentSystemMessage(base).sections.docs;
+		for (const forced of [
+			`My own instructions.\n\n${bridgeConfig.PI_DEFAULT_PREAMBLE}\n\n<note>\nquoted\n</note>`,
+			`My own instructions.\n\n${bridgeConfig.PI_DEFAULT_PREAMBLE}\n\n<note>\nquoted\n</note>\n\n${docs}`,
+		]) {
+			assertKeepsEverything(await forcedMessages(base, forced), forced);
+		}
+	});
+
+	// Review finding 2B: without Pi's docs line the forced prompt still renders Pi's default base.
 	it("sends d603a2b's output for a forced default base whose docs section an extension overrode (review P2-2B)", { timeout: 10_000 }, async () => {
 		const base = sessionMessages({ contextFiles, sections: { docs: "EXT DOCS" } });
 		const messages = await forcedMessages(base, `${getCurrentSystemPrompt(base)}\n\nPinned skill instructions.`);
