@@ -206,17 +206,27 @@ function hasPiDefaultBase(prompt: string, preamble: string | undefined): boolean
 	return preamble !== undefined ? preamble === PI_DEFAULT_PREAMBLE : prompt.startsWith(PI_DEFAULT_PREAMBLE);
 }
 
+/** Whether Pi's rendered default base starts at `at`: Pi's preamble directly
+ *  followed by Pi's tools section as Pi renders it, with Pi's docs section
+ *  later, so a prompt that only quotes the sentence is not taken for it. */
+function piBaseAt(prompt: string, at: number): boolean {
+	const base = prompt.slice(at);
+	return base.startsWith(PI_DEFAULT_PREAMBLE) && piBlockRange(base, PI_TOOLS_BLOCK)?.[0] === PI_DEFAULT_PREAMBLE.length && piBlockRange(base, PI_DOCS_BLOCK) !== undefined;
+}
+
 /** Where Pi's rendered default base starts in a content-only prompt that a
  *  before_agent_start hook prefixed with its own text (pi-subagents puts its
- *  child instructions there), or undefined. The base is Pi's preamble opening
- *  a paragraph, directly followed by Pi's tools section as Pi renders it, with
- *  Pi's docs section later, so a prompt that only quotes the sentence is not
- *  taken for it. */
+ *  child instructions there), or undefined. */
 function piBaseAfterHookText(prompt: string): number | undefined {
 	const at = prompt.indexOf(`\n\n${PI_DEFAULT_PREAMBLE}${PI_TOOLS_BLOCK.open}`);
-	if (at === -1) return undefined;
-	const base = prompt.slice(at + 2);
-	return piBlockRange(base, PI_TOOLS_BLOCK)?.[0] === PI_DEFAULT_PREAMBLE.length && piBlockRange(base, PI_DOCS_BLOCK) ? at + 2 : undefined;
+	return at !== -1 && piBaseAt(prompt, at + 2) ? at + 2 : undefined;
+}
+
+/** Whether a content-only prompt carries Pi's complete rendered default base,
+ *  at its start or behind a hook's text. Anthropic refuses such a prompt as a
+ *  third-party app whoever sends it. */
+export function carriesPiDefaultBase(prompt: string): boolean {
+	return piBaseAt(prompt, 0) || piBaseAfterHookText(prompt) !== undefined;
 }
 
 /**
@@ -242,9 +252,13 @@ export function resolveSystemPrompt(prompt: string, modelKey: string, config: Sy
 	const base = preamble === undefined && !prompt.startsWith(PI_DEFAULT_PREAMBLE) ? piBaseAfterHookText(prompt) : undefined;
 	if (base !== undefined) {
 		// The hook's text takes the place of Pi's preamble, after the
-		// replacement; preservePiContext false sends the replacement alone.
+		// replacement, unless it already leads with it; preservePiContext
+		// false sends the replacement alone.
 		const resolved = resolveSystemPrompt(prompt.slice(base), modelKey, config);
-		return config.preservePiContext === false ? resolved : `${replacement}\n\n${prompt.slice(0, base - 2)}${resolved.slice(replacement.length)}`;
+		if (config.preservePiContext === false) return resolved;
+		const lead = prompt.slice(0, base - 2);
+		const head = lead === replacement || lead.startsWith(`${replacement}\n`) ? lead : `${replacement}\n\n${lead}`;
+		return `${head}${resolved.slice(replacement.length)}`;
 	}
 	if (!hasPiDefaultBase(prompt, preamble)) {
 		if (prompt === replacement || prompt.startsWith(`${replacement}\n`)) return prompt;

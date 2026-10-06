@@ -6,7 +6,7 @@ import { type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { createSdkMcpServer, type query, type EffortLevel, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { accountSessionScope, claudeChildEnv, type ClaudeAccountRoute } from "./account-router.ts";
 import { spawnClaudeCodeWithDiagnostics } from "./claude-executable.ts";
-import { normalizeEffortLevel, resolveSystemPrompt, type Config } from "./config.ts";
+import { carriesPiDefaultBase, normalizeEffortLevel, resolveSystemPrompt, type Config } from "./config.ts";
 import { connectorQueryOptions, connectorWriteModeFor, connectorsEnabledFor, settingSourcesForQuery } from "./connectors.ts";
 import { connectorServersSnapshot } from "./connector-runtime.ts";
 import { PROVIDER_ID } from "./convert.ts";
@@ -65,8 +65,9 @@ export interface BuiltClaudeQueryOptions {
 	// Diagnostics-ish bits the caller's debug line reports.
 	enableCloudMcp: boolean;
 	/** `pi-main:<evidence>` for Pi's main agent prompt, the only prompt a
-	 * configured replacement changes; `caller` for any other prompt. */
-	systemPromptSource: "pi-main:sections" | "pi-main:session" | "caller";
+	 * configured replacement changes in full; `caller-pi-base` for another
+	 * prompt that carries Pi's default base; `caller` for any other prompt. */
+	systemPromptSource: "pi-main:sections" | "pi-main:session" | "caller-pi-base" | "caller";
 	effort?: EffortLevel;
 	fallbackModel?: string;
 }
@@ -76,18 +77,25 @@ interface OutboundSystemPrompt {
 	source: BuiltClaudeQueryOptions["systemPromptSource"];
 }
 
-/** The system prompt a query sends Claude. Only Pi's main agent prompt takes
- * the configured replacement; a prompt from compaction or an extension's own
- * call keeps its instructions. The preamble tells resolveSystemPrompt whether
- * Pi built the base. */
+/** The system prompt a query sends Claude. Pi's main agent prompt takes the
+ * configured replacement; a prompt from compaction or an extension's own call
+ * keeps its instructions. Another prompt that carries Pi's default base (an
+ * in-process subagent the bridge never saw start, a copy of Pi's prompt) has
+ * only that base replaced, whatever preservePiContext says: Anthropic refuses
+ * it as it is, and the caller's own text must still reach Claude. The
+ * preamble tells resolveSystemPrompt whether Pi built the base. */
 function outboundSystemPrompt(
 	input: Pick<BuildClaudeQueryOptionsInput, "queryModel" | "bridgeConfig" | "systemPromptOrigin"> & { systemPrompt: string },
 ): OutboundSystemPrompt {
 	const { queryModel, bridgeConfig, systemPrompt, systemPromptOrigin } = input;
+	const modelKey = `${queryModel.provider}/${queryModel.id}`;
 	const evidence = piMainPromptEvidence(systemPromptOrigin);
-	if (!evidence) return { prompt: systemPrompt, source: "caller" };
+	if (!evidence) {
+		if (systemPromptOrigin?.preamble !== undefined || !carriesPiDefaultBase(systemPrompt)) return { prompt: systemPrompt, source: "caller" };
+		return { prompt: resolveSystemPrompt(systemPrompt, modelKey, { ...bridgeConfig.systemPrompt, preservePiContext: true }), source: "caller-pi-base" };
+	}
 	return {
-		prompt: resolveSystemPrompt(systemPrompt, `${queryModel.provider}/${queryModel.id}`, bridgeConfig.systemPrompt, systemPromptOrigin?.preamble),
+		prompt: resolveSystemPrompt(systemPrompt, modelKey, bridgeConfig.systemPrompt, systemPromptOrigin?.preamble),
 		source: `pi-main:${evidence}`,
 	};
 }
