@@ -4,22 +4,30 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ## 2026-10-05
 
+### Highlights
+
+- **Subagents on Claude models:** `delegate`, any other agent with `systemPromptMode: append`, an in-process subagent and side chat no longer fail with "Third-party apps now draw from your extra usage".
+
 ### Fixed
 
 - **A subagent whose prompt adds to Pi's default one was refused as a third-party app.**
   - **Before:** the replacement looked for Pi's default prompt only at the very start. pi-subagents puts its child instructions in front of Pi's prompt, so for an agent with `systemPromptMode: append` (the `delegate` agent) the bridge kept Pi's prompt whole, documentation line included, and Anthropic answered every request with "Third-party apps now draw from your extra usage".
-  - **Now:** Pi's default base is also recognized behind a hook's leading text, when Pi's opening sentence starts a paragraph, Pi's tool list comes right after it, and Pi's documentation section follows. The replacement takes the place of Pi's opening, tools and docs as usual, and the hook's text follows the replacement.
+  - **Now:** Pi's default base is also recognized behind a hook's leading text, when Pi's opening sentence starts a paragraph, Pi's tool list comes right after it, and Pi's documentation section follows. The replacement takes the place of Pi's opening, tools and docs as usual, and the hook's text follows the replacement. (`a5f65a8`)
 - **An in-process subagent or side chat on Pi's default prompt was refused as a third-party app.**
   - **Before:** the replacement applied only to sessions the bridge saw start. A subagent run in-process (`async: false`) does not load the bridge, and side chat sends a copy of Pi's prompt, so both went out with Pi's documentation line and every request was refused.
-  - **Now:** any prompt that carries Pi's complete default base has that base replaced, and the rest of the prompt is kept, even with `preservePiContext: false`. Prompts without Pi's base, like Pi's summaries and extensions' own calls, are still sent unchanged.
+  - **Now:** any prompt that carries Pi's complete default base has that base replaced, and the rest of the prompt is kept, even with `preservePiContext: false`. Prompts without Pi's base, like Pi's summaries and extensions' own calls, are still sent unchanged. (`98b3927`)
 
 ## 2026-10-04
+
+### Highlights
+
+- **No more fake "No response requested." after Esc:** Claude no longer sees a reply it never wrote after you interrupt it, and no longer answers with that line itself. A message you resend after Esc reaches Claude once, not twice.
 
 ### Fixed
 
 - **After an Esc, Claude saw a "No response requested." reply it never wrote.**
   - **Before:** Pi drops a reply cut off by Esc, so the rebuild that follows left your unanswered message, or the aborted tool's result, last in Claude Code's transcript. Claude Code resumes such a transcript by inserting a synthetic "No response requested." reply. Claude read it as its own and now and then answered a later prompt with that exact line. When you resent a message after an Esc, Claude also got it twice, once before the fake reply and once after.
-  - **Now:** everything after Claude's last real reply goes in the prompt, with Claude Code's own `[Request interrupted by user]` where the reply was cut off. A rebuild that still ends on a tool result gets a placeholder that Claude Code leaves out of the request, so the result and your next message reach Claude together, as Pi's own Anthropic provider sends them.
+  - **Now:** everything after Claude's last real reply goes in the prompt, with Claude Code's own `[Request interrupted by user]` where the reply was cut off. A rebuild that still ends on a tool result gets a placeholder that Claude Code leaves out of the request, so the result and your next message reach Claude together, as Pi's own Anthropic provider sends them. (`094dcfe`)
 
 ## 2026-10-03
 
