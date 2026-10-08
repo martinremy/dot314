@@ -2,6 +2,14 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-07
+
+### Added
+
+- **A host that restarts mid-turn can continue the turn.**
+  - **Before:** an app that runs the bridge inside its own durable host, rather than in Pi, could restart while Claude waited for a tool result. The query that made the call died with the host, so the request carrying the result took the orphaned-result path, and the turn ended with an empty reply after you approved the tool.
+  - **Now:** such a host marks that request as a resumed turn. The bridge rebuilds Claude's session under a new id from the whole conversation, tool results included, and asks Claude to continue from those results without repeating the calls. The turn gets a real reply, and the next prompt resumes the session warm. Pi never marks a request this way, so nothing changes in Pi.
+
 ## 2026-10-05
 
 ### Highlights

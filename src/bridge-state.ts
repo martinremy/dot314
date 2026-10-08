@@ -11,7 +11,7 @@ import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairin
  *  timing lines. */
 export const REBUILD_MARKS = [
 	"abort", "idle-timeout", "history-replaced", "history-rewritten", "user-unresolved",
-	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified",
+	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified", "host-resumed",
 ] as const;
 export type RebuildMark = typeof REBUILD_MARKS[number];
 

@@ -18,7 +18,7 @@ import { extractUserPrompt, extractUserPromptBlocks, slashLed } from "./user-pro
 import { buildModels, modelDisplayName } from "./models.ts";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.ts";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.ts";
-import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCalls, isForkLane, laneInUse, peekCtx, releaseForkLane, requestLaneFor, strandedToolCallResult, summarizeDroppedUserMessages, takeQueuedOrParkedResult, toolCallDrainCause, type ClaimedToolCall, type DeferredUserMessage, type QueryRestartRequest, type ToolUseIdClaim } from "./query-state.ts";
+import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCalls, idleForHostResume, isForkLane, laneInUse, peekCtx, releaseForkLane, requestLaneFor, strandedToolCallResult, summarizeDroppedUserMessages, takeQueuedOrParkedResult, toolCallDrainCause, type ClaimedToolCall, type DeferredUserMessage, type QueryRestartRequest, type ToolUseIdClaim } from "./query-state.ts";
 import { answersKnownCall, deliverSteerBeforeResults, resolveToolResults } from "./tool-result-delivery.ts";
 import { abortSdkQuery, closeSdkQuery, teardownQuery } from "./query-teardown.ts";
 import { loadConfig, recordProjectTrust } from "./config.ts";
@@ -133,6 +133,15 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 // Deliberately NOT Symbol.for: rotation state rides options between the retry
 // re-entry and the original call within ONE module instance only.
 const ROTATION_STATE_KEY = Symbol("claude-bridge:rotationState");
+// A host that runs this bridge itself and can resume a turn across its own
+// restart (isHostResumedTurn) finds HOST_RESUME_MARKER on the API object the
+// extension was given, and sets HOST_RESUMED_TURN in the stream options of
+// such a request. Pi does neither.
+const HOST_RESUME_MARKER = Symbol.for("kendex.pi.claude-bridge.host-resume.v1");
+const HOST_RESUMED_TURN = Symbol.for("kendex.pi.claude-bridge.host-resumed-turn.v1");
+/** A host-resumed turn's prompt. Never part of the host's history: the
+ *  record's cursor and digests cover the host's messages only. */
+const HOST_RESUMED_PROMPT = "Continue from the completed tool results above; do not repeat completed tool calls.";
 
 /** Hard cap on account-rotation attempts per request (CHANGELOG 3.0.0). */
 const MAX_ROTATION_ATTEMPTS = 16;
@@ -147,6 +156,7 @@ interface RotationRequestState {
 
 type BridgeStreamOptions = SimpleStreamOptions & {
 	[ROTATION_STATE_KEY]?: RotationRequestState;
+	[HOST_RESUMED_TURN]?: boolean;
 };
 
 // MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
@@ -673,13 +683,36 @@ function verifiedHeldSuffix(
  *  The request joins its lane's running query only as that query's own
  *  callback; anything else runs as a query of its own (requestLaneFor). */
 export function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const laneId = requestLaneFor(options?.sessionId, context.messages, (lane) => runInRequestLane(lane, () => isForeignConversation(getSharedSession(), context.messages)));
-	return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options));
+	const hostResumed = isHostResumedTurn(options, context.messages);
+	if (hostResumed) debug(`provider: host-resumed turn (session ${options!.sessionId!.slice(0, 8)}): its query ended with the host; continuing from ${context.messages.length} messages`);
+	const laneId = hostResumed ? options!.sessionId : requestLaneFor(options?.sessionId, context.messages, (lane) => runInRequestLane(lane, () => isForeignConversation(getSharedSession(), context.messages)));
+	return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, undefined, hostResumed));
+}
+
+/** Whether this request continues a turn whose query died with its host: the
+ *  host says so (HOST_RESUMED_TURN), the request is not cancelled, its context
+ *  ends in a result for every tool call of the assistant message before them
+ *  and nothing else, and no query of this process is in its lane or made one
+ *  of those calls. Such a request runs in its own lane and starts a fresh
+ *  query on a rebuilt session instead of taking the orphaned-result path,
+ *  which ends the turn. */
+function isHostResumedTurn(options: SimpleStreamOptions | undefined, messages: Context["messages"]): boolean {
+	const sessionId = options?.sessionId;
+	if ((options as BridgeStreamOptions | undefined)?.[HOST_RESUMED_TURN] !== true || sessionId === undefined || options?.signal?.aborted) return false;
+	let assistant = messages.length - 1;
+	while (assistant >= 0 && messages[assistant].role === "toolResult") assistant--;
+	const turn = messages[assistant];
+	if (turn?.role !== "assistant" || assistant === messages.length - 1) return false;
+	const calls = turn.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []);
+	const results = messages.slice(assistant + 1).map((message) => (message as { toolCallId?: unknown }).toolCallId);
+	return calls.length === results.length && calls.every((id) => results.includes(id)) && idleForHostResume(sessionId, messages);
 }
 
 /** `inherited`: a re-entry (restart, account retry) answers on another
- *  request's Pi stream, so its phases go to that request's timing record. */
-function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions, inherited?: RequestTiming): AssistantMessageEventStream {
+ *  request's Pi stream, so its phases go to that request's timing record.
+ *  `hostResumed`: isHostResumedTurn granted the request (an account retry
+ *  repeats it). */
+function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions, inherited?: RequestTiming, hostResumed = false): AssistantMessageEventStream {
 	// The lane this request runs in, for callbacks that fire OUTSIDE it: an
 	// AbortSignal listener runs in the aborter's async context, not ours.
 	const laneId = currentRequestLaneId();
@@ -713,7 +746,7 @@ function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options
 	const stream = newAssistantMessageEventStream();
 	const timing = inherited ?? startRequestTiming(stream, laneId, model.id, context.messages.length);
 	try {
-		return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing);
+		return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed);
 	} catch (error) {
 		releaseEphemeralLane();
 		if (!inherited) timing?.settle("threw");
@@ -729,6 +762,7 @@ function streamRequestInLane(
 	releaseEphemeralLane: () => void,
 	stream: AssistantMessageEventStream,
 	timing: RequestTiming | undefined,
+	hostResumed: boolean,
 ): AssistantMessageEventStream {
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -958,12 +992,14 @@ function streamRequestInLane(
 	// same Pi run (its signal) that answers a call of the failed query is this
 	// callback even when it ends in a user message; a rebuild then owns the
 	// steer. A later run's new prompt of the same shape still starts fresh.
+	// A host-resumed turn's query died with its host, so nothing else will
+	// continue the turn: it starts a fresh query instead (isHostResumedTurn).
 	const lastMsg = context.messages[context.messages.length - 1];
 	const heldForRun = ctx().undeliveredFailure;
 	const steeredResultId = lastMsg?.role !== "toolResult" && heldForRun && options?.signal && !options.signal.aborted && heldForRun.runSignals.has(options.signal)
 		? extractAllToolResults(context).map((result) => result.toolCallId).find((id) => id !== undefined && heldForRun.toolCallIds.has(id))
 		: undefined;
-	if (lastMsg?.role === "toolResult" || steeredResultId !== undefined) {
+	if (!hostResumed && (lastMsg?.role === "toolResult" || steeredResultId !== undefined)) {
 		if (timing) {
 			timing.kind = "continuation";
 			attachRequestTiming(ctx(), timing);
@@ -1205,16 +1241,24 @@ function streamRequestInLane(
 
 	const accountScope = accountSessionScope(account);
 	const cursorBeforeSync = getSharedSession()?.cursor ?? null;
+	// A host-resumed turn rebuilds Claude's session from every message, its
+	// tool results included, and prompts with HOST_RESUMED_PROMPT. The new
+	// session takes a new id: the host's killed Claude Code child may still be
+	// writing the old transcript.
+	if (hostResumed) markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
+	const syncMessages: Context["messages"] = hostResumed
+		? [...context.messages, { role: "user", content: HOST_RESUMED_PROMPT, timestamp: Date.now() }]
+		: context.messages;
 	const fresh: FreshQuery = {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages,
 	};
 	// A forked rebuild awaits the SDK: by then the request may be cancelled, or
 	// a session shutdown may have ended its lane (a new context replaced this
 	// request's).
 	const requestEnded = (): boolean => options?.signal?.aborted === true || peekCtx() !== attemptCtx;
-	const synced = syncSharedSession(context.messages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
+	const synced = syncSharedSession(syncMessages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
 		cancelled: requestEnded,
 		customToolNameToPi,
 	});
@@ -1249,6 +1293,10 @@ interface FreshQuery {
 	claudeExecutablePreflight: ReturnType<typeof preflightClaudeExecutable> | undefined;
 	accountScope: ReturnType<typeof accountSessionScope>;
 	cursorBeforeSync: number | null;
+	hostResumed: boolean;
+	// What the Claude session is synced to: the context, and a host-resumed
+	// turn's prompt after it. The query's prompt is its tail from promptStart.
+	syncMessages: Context["messages"];
 }
 
 /**
@@ -1305,7 +1353,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages,
 	} = fresh;
 	const { sessionId: resumeSessionId, promptStart } = syncResult;
 	timing?.noteSync(syncResult.sync, Boolean(resumeSessionId));
@@ -1323,7 +1371,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	// so the record created by a Case-1 clean start is protected from the very
 	// next idle-window foreign query.
 	const conversationFp = foreignContext ? undefined : conversationFingerprint(context.messages);
-	const promptMessages = context.messages.slice(promptStart);
+	const promptMessages = syncMessages.slice(promptStart);
 	const promptBlocks = extractUserPromptBlocks(promptMessages);
 	let promptText = extractUserPrompt(promptMessages) ?? "";
 
@@ -1883,7 +1931,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 			const retryStream = runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, {
 				...(options ?? {}),
 				[ROTATION_STATE_KEY]: rotationState,
-			} as BridgeStreamOptions, timing));
+			} as BridgeStreamOptions, timing, hostResumed));
 			// End exactly once per outcome. Ending in a `finally` ran on
 			// the throw path too, BEFORE the .catch below could push its error
 			// event — and EventStream.push is a silent no-op after end, so a failed
@@ -2021,4 +2069,5 @@ export default function (pi: ExtensionAPI) {
 	// reload always no-ops, so it never overwrites the parent's streamSimple nor
 	// steals ownership. See PRIMARY_INSTANCE_KEY / ACTIVE_STREAM_SIMPLE_KEY.
 	applyProviderRegistration("load");
+	(pi as unknown as Record<symbol, unknown>)[HOST_RESUME_MARKER] = true;
 }
