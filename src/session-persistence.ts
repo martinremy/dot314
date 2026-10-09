@@ -5,7 +5,7 @@ import { closeSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFi
 import { dirname, resolve as pathResolve } from "path";
 import { REBUILD_MARKS, getExtensionApi, getSharedSession, reportSyntheticToolResultRepair, safeNotify, setSharedSession, type RebuildMark, type SessionState } from "./bridge-state.ts";
 import { displayPath } from "./config.ts";
-import { convertPiMessages } from "./convert.ts";
+import { convertPiMessages, lastConversationIndex } from "./convert.ts";
 import { debug, diagDump, diagGuidance, parseErrorShape } from "./debug.ts";
 import { noteAnomaly } from "./agent-notice.ts";
 import { UNVERIFIED_HISTORY_DIGEST, historyDigest, sharedHistoryMatches } from "./history-digest.ts";
@@ -452,7 +452,7 @@ export function planIncrementalPromptBatch(
 	cursor: number,
 ): IncrementalPromptBatchPlan | undefined {
 	const lastIndex = messages.length - 1;
-	if (lastIndex < 0 || (messages[lastIndex] as { role?: string }).role !== "user") return undefined;
+	if ((messages[lastConversationIndex(messages)] as { role?: string } | undefined)?.role !== "user") return undefined;
 
 	// A cursor past the end is PROOF this messages array is not the conversation
 	// the cursor describes (e.g. another conversation's short context arriving
@@ -464,10 +464,14 @@ export function planIncrementalPromptBatch(
 	}
 	const boundedCursor = Math.max(0, cursor);
 	let promptStart = boundedCursor;
-	if ((messages[promptStart] as { role?: string } | undefined)?.role === "assistant") promptStart++;
+	let reply = promptStart;
+	while ((messages[reply] as { role?: string } | undefined)?.role === "system") reply++;
+	if ((messages[reply] as { role?: string } | undefined)?.role === "assistant") promptStart = reply + 1;
 
 	const pendingPrompts = messages.slice(promptStart);
-	if (pendingPrompts.length === 0 || pendingPrompts.some((message) => (message as { role?: string }).role !== "user")) {
+	const pendingRoles = pendingPrompts.map((message) => (message as { role?: string }).role);
+	const userMessageCount = pendingRoles.filter((role) => role === "user").length;
+	if (userMessageCount === 0 || pendingRoles.some((role) => role !== "user" && role !== "system")) {
 		// Log the rejected tail so a diag log can tell apart "two assistants in
 		// tail" vs "toolResult in tail" vs "stale cursor" without a repro.
 		debug(`planIncrementalPromptBatch: rejected — cursor=${cursor} promptStart=${promptStart} tail roles=[${messages.slice(boundedCursor).map((m) => (m as { role?: string }).role).join(", ")}]`);
@@ -476,7 +480,7 @@ export function planIncrementalPromptBatch(
 
 	return {
 		promptStart,
-		userMessageCount: pendingPrompts.length,
+		userMessageCount,
 	};
 }
 
@@ -641,7 +645,7 @@ export function syncSharedSession(
 			`(cursor=${sharedSession.cursor}, priors=${priorMessages.length}) — clean one-shot, record untouched`,
 		);
 		debug(`syncResult: path=foreign-one-shot cause=foreign-conversation`);
-		return { sessionId: null, promptStart: messages.length - 1, foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
+		return { sessionId: null, promptStart: lastConversationIndex(messages), foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
 	}
 
 	// Why the REUSE check below failed, when it ran.

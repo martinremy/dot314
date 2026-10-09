@@ -11,6 +11,7 @@ import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import type { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { isConnectorTool } from "./connectors.ts";
+import { lastConversationIndex } from "./convert.ts";
 import type { McpResult } from "./extract-tool-results.ts";
 import { currentRequestLaneId } from "./request-lane.ts";
 import { debug, diagDump } from "./debug.ts";
@@ -1212,7 +1213,7 @@ export function requestLaneFor(
 	const callback = callbackLane(sessionId, messages);
 	if (callback !== null) return callback;
 	const reason = contextInUse(own) ? "its lane is busy"
-		: (messages.at(-1) as { role?: unknown } | undefined)?.role === "toolResult" ? "its tool result answers no call of its lane"
+		: (messages[lastConversationIndex(messages as Context["messages"])] as { role?: unknown } | undefined)?.role === "toolResult" ? "its tool result answers no call of its lane"
 		: otherConversation(sessionId) ? "its lane holds another conversation"
 		: undefined;
 	if (reason === undefined) return sessionId;

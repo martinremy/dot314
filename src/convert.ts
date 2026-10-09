@@ -130,6 +130,17 @@ export function isSkippedAssistant(msg: PiMessage): boolean {
 	return msg.role === "assistant" && (msg.stopReason === "error" || msg.stopReason === "aborted");
 }
 
+/** The index of the conversation's last message, past the system messages
+ *  after it. Pi Durable records each change of the system prompt or tool set
+ *  as a system message where it happens: after the input that starts a turn,
+ *  or after a tool result. Such a message is no input, so whatever the
+ *  request answers ends before it. */
+export function lastConversationIndex(messages: readonly PiMessage[]): number {
+	let index = messages.length - 1;
+	while (index >= 0 && messages[index].role === "system") index--;
+	return index;
+}
+
 /** A Claude thinking block exactly as the API returned it, or undefined when
  *  it cannot be replayed (no signature, or a redacted block without its payload). */
 function claudeThinkingToAnthropic(block: { thinking?: string; thinkingSignature?: string; redacted?: boolean }): ContentBlock | undefined {

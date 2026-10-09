@@ -220,6 +220,17 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.deepEqual(chain.slice(0, kept.length).map(rendered), kept.map(rendered));
 	});
 
+	it("forks past a prompt whose run holds a durable host's system message", async () => {
+		writeOldTranscript(claudeDir, { prompt2: `${NOTICE_1}\n\n[Request interrupted by user]\n\n${NOTICE_2}` });
+		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
+		const cutOff = { role: "assistant", provider: "pi-claude", api: "anthropic", model: MODEL_ID, stopReason: "aborted", content: [], timestamp: 0 };
+		const system = { role: "system", content: "", sections: { base: "Pi Durable prompt" }, timestamp: 0 };
+
+		const result = await syncSharedSession([...piPriors({ prompt2: [NOTICE_1, system, cutOff, NOTICE_2] }), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
+
+		assert.equal(result.sync.forked, 10, "Claude Code's one prompt record covers the run, the system message included");
+	});
+
 	for (const [what, priors] of [
 		["in another order", piPriors({ prompt2: [NOTICE_2, NOTICE_1] })],
 		["without one of them", piPriors({ prompt2: [NOTICE_1] })],

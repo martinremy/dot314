@@ -24,6 +24,8 @@ import { extractUserPrompt } from "../src/user-prompt.js";
 const user = (text) => ({ role: "user", content: text });
 const assistant = () => ({ role: "assistant", content: [] });
 const assistantText = (text) => ({ role: "assistant", content: [{ type: "text", text }] });
+// Pi Durable's record of a system prompt or tool-set change, written where it happens.
+const system = () => ({ role: "system", content: "", sections: { base: "Pi Durable prompt" }, timestamp: 0 });
 const CWD = "/repo";
 
 // Runs `fn` with CLAUDE_CONFIG_DIR pointed at a throwaway dir so any REBUILD
@@ -94,6 +96,22 @@ describe("syncSharedSession REUSE path", () => {
 		assert.deepEqual(promptContents(messages, result.promptStart), ["u2", "u3"]);
 		assert.equal(__testGetBridgeIntegrityState().sharedSession.cursor, 2);
 	});
+
+	it("resumes past Pi Durable system messages around Claude's reply and prompts the new input", () => {
+		const messages = [user("u1"), system(), assistantText("hi"), user("u2"), system()];
+		setSharedSession({
+			sessionId: "sess-durable",
+			cursor: 1,
+			cwd: CWD,
+			historyDigest: historyDigest(messages.slice(0, 1)),
+			trailingAssistantDigest: historyDigest([assistantText("hi")]),
+		});
+
+		const result = syncSharedSession(messages, CWD);
+
+		assert.equal(result.sessionId, "sess-durable");
+		assert.equal(extractUserPrompt(messages.slice(result.promptStart)), "u2");
+	});
 });
 
 describe("syncSharedSession clean start", () => {
@@ -105,6 +123,15 @@ describe("syncSharedSession clean start", () => {
 		assert.equal(result.sessionId, null);
 		assert.equal(result.promptStart, 0);
 		assert.deepEqual(promptContents(messages, result.promptStart), ["hello"]);
+	});
+
+	it("prompts the user message Pi Durable's system message follows", () => {
+		const messages = [user("hello"), system()];
+
+		const result = syncSharedSession(messages, CWD);
+
+		assert.equal(result.sessionId, null);
+		assert.equal(extractUserPrompt(messages.slice(result.promptStart)), "hello");
 	});
 });
 

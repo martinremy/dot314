@@ -368,10 +368,12 @@ export function planNativePrefix(
 		// messages in a row (session-persistence.ts planIncrementalPromptBatch),
 		// or ones with a failed or cut-off reply among them (user-prompt.ts
 		// promptRunStart). The run reaches the end of that request's context,
-		// so it is the whole run, and Pi's next message is the reply.
+		// so it is the whole run, and Pi's next message is the reply. System
+		// messages inside the run add nothing to the prompt.
 		let end = index;
-		while (end < priors.length && (priors[end].role === "user" || isSkippedAssistant(priors[end]))) end++;
-		if (end - index < 2 || end === priors.length || !sameContent(content, [promptForm(priors.slice(index, end))])) return undefined;
+		while (end < priors.length && (priors[end].role === "user" || priors[end].role === "system" || isSkippedAssistant(priors[end]))) end++;
+		const run = priors.slice(index, end);
+		if (run.filter((message) => message.role !== "system").length < 2 || end === priors.length || !sameContent(content, [promptForm(run)])) return undefined;
 		return trailing(at + 1, at, end);
 	};
 

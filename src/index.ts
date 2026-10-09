@@ -13,7 +13,7 @@ import * as piAi from "@earendil-works/pi-ai";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
-import { PROVIDER_ID } from "./convert.ts";
+import { PROVIDER_ID, lastConversationIndex } from "./convert.ts";
 import { extractUserPrompt, extractUserPromptBlocks, slashLed } from "./user-prompt.ts";
 import { buildModels, modelDisplayName } from "./models.ts";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.ts";
@@ -699,12 +699,13 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 function isHostResumedTurn(options: SimpleStreamOptions | undefined, messages: Context["messages"]): boolean {
 	const sessionId = options?.sessionId;
 	if ((options as BridgeStreamOptions | undefined)?.[HOST_RESUMED_TURN] !== true || sessionId === undefined || options?.signal?.aborted) return false;
-	let assistant = messages.length - 1;
+	const end = lastConversationIndex(messages);
+	let assistant = end;
 	while (assistant >= 0 && messages[assistant].role === "toolResult") assistant--;
 	const turn = messages[assistant];
-	if (turn?.role !== "assistant" || assistant === messages.length - 1) return false;
+	if (turn?.role !== "assistant" || assistant === end) return false;
 	const calls = turn.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []);
-	const results = messages.slice(assistant + 1).map((message) => (message as { toolCallId?: unknown }).toolCallId);
+	const results = messages.slice(assistant + 1, end + 1).map((message) => (message as { toolCallId?: unknown }).toolCallId);
 	return calls.length === results.length && calls.every((id) => results.includes(id)) && idleForHostResume(sessionId, messages);
 }
 
@@ -994,7 +995,7 @@ function streamRequestInLane(
 	// steer. A later run's new prompt of the same shape still starts fresh.
 	// A host-resumed turn's query died with its host, so nothing else will
 	// continue the turn: it starts a fresh query instead (isHostResumedTurn).
-	const lastMsg = context.messages[context.messages.length - 1];
+	const lastMsg = context.messages[lastConversationIndex(context.messages)];
 	const heldForRun = ctx().undeliveredFailure;
 	const steeredResultId = lastMsg?.role !== "toolResult" && heldForRun && options?.signal && !options.signal.aborted && heldForRun.runSignals.has(options.signal)
 		? extractAllToolResults(context).map((result) => result.toolCallId).find((id) => id !== undefined && heldForRun.toolCallIds.has(id))

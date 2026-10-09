@@ -5,7 +5,7 @@
 
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import type { Context } from "@earendil-works/pi-ai";
-import { isSkippedAssistant, messageContentToText } from "./convert.ts";
+import { isSkippedAssistant, lastConversationIndex, messageContentToText } from "./convert.ts";
 import { debug } from "./debug.ts";
 
 /** Claude Code's own record of an Esc that cut off a reply. */
@@ -18,11 +18,12 @@ export const INTERRUPTED_MARKER = "[Request interrupted by user]";
  *  transcript, and Claude Code resumes a transcript that ends on a user
  *  message with a synthetic "No response requested." reply, which Claude
  *  reads as its own. In the prompt, a cut-off reply reads as Claude Code's
- *  own record of the Esc. */
+ *  own record of the Esc. System messages among or after them belong to the
+ *  run but add nothing to the prompt (convert.ts lastConversationIndex). */
 export function promptRunStart(messages: Context["messages"]): number {
-	let start = messages.length - 1;
+	let start = lastConversationIndex(messages);
 	if (messages[start]?.role !== "user") return start;
-	while (start > 0 && (messages[start - 1].role === "user" || isSkippedAssistant(messages[start - 1]))) start--;
+	while (start > 0 && (messages[start - 1].role === "user" || messages[start - 1].role === "system" || isSkippedAssistant(messages[start - 1]))) start--;
 	return start;
 }
 
@@ -30,7 +31,8 @@ export function promptRunStart(messages: Context["messages"]): number {
  *  message's own, INTERRUPTED_MARKER for a reply cut off by Esc, nothing for
  *  a failed one. Null when the run holds no user message or anything that
  *  belongs in history. */
-function promptParts(messages: Context["messages"]): Array<string | Extract<Context["messages"][number], { role: "user" }>["content"]> | null {
+function promptParts(run: Context["messages"]): Array<string | Extract<Context["messages"][number], { role: "user" }>["content"]> | null {
+	const messages = run.filter((message) => message.role !== "system");
 	if (!messages.some((message) => message.role === "user")) return null;
 	if (messages.some((message) => message.role !== "user" && !isSkippedAssistant(message))) return null;
 	return messages.flatMap((message) =>

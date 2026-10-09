@@ -2,6 +2,14 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-09
+
+### Fixed
+
+- **The first prompt of a conversation in a durable host reaches Claude as the prompt.**
+  - **Before:** a host that records each system prompt or tool change as a system message in the conversation writes one right after the input that starts a turn. The bridge took the last message as the input, so the first query of every conversation sent Claude a placeholder `[continue]` prompt with your text only as history, and told the agent about an `empty_prompt` anomaly, which it then repeated to you.
+  - **Now:** the bridge looks past those system messages wherever it reads the end of the conversation: the prompt, resuming a session, checking Claude's last reply, a tool result whose query is gone, a resumed turn, and choosing the request's lane. Pi writes no such messages, so nothing changes in Pi.
+
 ## 2026-10-07
 
 ### Added
