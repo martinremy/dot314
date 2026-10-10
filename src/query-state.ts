@@ -303,6 +303,11 @@ export class QueryContext {
 	/** Pi replaced the history while this query was active. Its next callback
 	 *  must use the new context instead of resuming the stale Claude session. */
 	piHistoryReplaced = false;
+	/** Pi replaced the history after this lane's query ended. A request that
+	 *  then ends at a tool result is Pi retrying the turn (an overflow: the
+	 *  query died on "Prompt is too long" and Pi compacted), which no query
+	 *  will continue, so it restarts the turn on the new history. */
+	historyReplacedAfterQuery = false;
 	reportedHistoryRestartDecline = false;
 	restartRequest: QueryRestartRequest | null = null;
 	latestCursor = 0;

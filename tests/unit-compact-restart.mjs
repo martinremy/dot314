@@ -7,7 +7,7 @@ import { createSession, openSession } from "cc-session-io";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { __testGetBridgeIntegrityState, __testSetBridgeIntegrityState, __testSetSdkQueryFactory, onPiHistoryReplaced, streamClaudeAgentSdk } from "../src/index.ts";
+import { HISTORY_REPLACED_PROMPT, __testGetBridgeIntegrityState, __testSetBridgeIntegrityState, __testSetSdkQueryFactory, onPiHistoryReplaced, streamClaudeAgentSdk } from "../src/index.ts";
 import { cancelScheduledToolUseEnd } from "../src/assistant-stream.ts";
 import { ctx, resetStack } from "../src/query-state.ts";
 
@@ -335,5 +335,40 @@ describe("compaction while Claude waits for a Pi tool result", () => {
 			assert.equal(calls.length, 2);
 			assert.equal(events.filter((event) => event.type === "done").length, 1);
 		}, undefined, true);
+	});
+});
+
+describe("compaction after Claude's query ended on an overflow", () => {
+	// Claude's request after a tool result fails with "Prompt is too long", so
+	// the query ends; Pi compacts, then retries the turn from that tool result.
+	function overflowingQuery(record) {
+		const gate = Promise.withResolvers();
+		record.release = () => gate.resolve();
+		return {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "system", subtype: "init", session_id: sessionId };
+				yield { type: "assistant", message: { content: [{ type: "tool_use", id: "t0", name: "mcp__custom-tools__echo", input: { id: "t0" } }] } };
+				await gate.promise;
+				yield { type: "result", subtype: "success", is_error: true, result: "Prompt is too long" };
+				throw new Error("Claude Code returned an error result: Prompt is too long");
+			},
+			close() { gate.resolve(); },
+			async interrupt() { gate.resolve(); },
+		};
+	}
+
+	it("continues the retried turn on Pi's compacted history", async () => {
+		await withWaitingQuery(async ({ root, record, calls }) => {
+			const callback = collect(streamClaudeAgentSdk(model, { messages: [system, runEcho, toolCall, toolResult] }, { cwd: root }));
+			record.release();
+			assert.match((await callback).at(-1).error.errorMessage, /Prompt is too long/);
+			await waitFor(() => ctx().activeQuery === null);
+			onPiHistoryReplaced("session_compact");
+			const retry = await collect(streamClaudeAgentSdk(model, { messages: [system, user("summary"), toolCall, toolResult] }, { cwd: root }));
+			assert.equal(calls.length, 2);
+			assert.ok(calls[1].prompt.endsWith(HISTORY_REPLACED_PROMPT), calls[1].prompt);
+			assert.equal(retry.filter((event) => event.type === "done").length, 1);
+			assert.deepEqual(retry.filter((event) => event.type === "text_delta").map((event) => event.delta), ["resumed"]);
+		}, undefined, false, overflowingQuery);
 	});
 });

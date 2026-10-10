@@ -11,6 +11,10 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ### Fixed
 
+- **A turn continues after Pi compacts on "Prompt is too long".**
+  - **Before:** when a tool result pushed Claude's request over the context limit, the query ended with the overflow error. Pi then compacted and retried the turn from that tool result, but with no query left to deliver it to, the bridge treated it as a result from a cancelled call and ended the turn with nothing. The agent stopped right after the compaction.
+  - **Now:** a retry that follows Pi replacing the history of an ended query starts a new query on the compacted history, with the same instruction a running query gets when its history is replaced: continue from the results above without repeating finished tool calls.
+
 - **A foreground subagent in a worktree is told its own working directory.**
   - **Before:** Pi does not tell a provider which directory a request belongs to, so the bridge started Claude Code in the Pi process's directory. pi-subagents runs a foreground child (`async: false`) inside the parent's process, so a child working in a worktree or another `cwd` had its Claude Code started in the parent's checkout. Claude Code's first prompt then told the model "Primary working directory" was the parent's checkout while Pi's prompt named the worktree. The bridge also saved that directory with the session, so reopening the child rebuilt Claude's session from scratch.
   - **Now:** the bridge records each Pi session's directory when the session starts and starts that session's Claude Code there. It also reads that directory's `.pi/claude-bridge.json`, so a child in a trusted worktree uses the worktree's project settings rather than the parent checkout's. Pi itself and async subagents, which run in their own directory, see no change.

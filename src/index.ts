@@ -605,10 +605,10 @@ function applyProviderRegistration(trigger: string): void {
 
 export const HISTORY_REPLACED_PROMPT = "The conversation above was rewritten by Pi (compaction or history navigation). It is the complete current history, including the results of every tool call that has already run. Continue the turn from there, and do not repeat a tool call whose result is already above.";
 
-function restartContext(request: QueryRestartRequest): Context {
+function restartContext(context: Context): Context {
 	return {
-		...request.context,
-		messages: [...request.context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }],
+		...context,
+		messages: [...context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }],
 	};
 }
 
@@ -622,11 +622,14 @@ export function onPiHistoryReplaced(event: "session_compact" | "session_tree"): 
 	if (running) {
 		if (restarts) queryCtx.piHistoryReplaced = true;
 		reportToolResultMismatch(queryCtx, event, piSessionCwd(currentRequestLaneId()), { expectedInterruption: restarts });
-	} else if (queryCtx.undeliveredFailure) {
-		// The tool-result callback it was held for answers a history Pi has
-		// just replaced; the conversation's next request starts afresh.
-		debug(`${event}: dropping a terminal failure held for a tool-result callback`);
-		queryCtx.undeliveredFailure = null;
+	} else {
+		queryCtx.historyReplacedAfterQuery = true;
+		if (queryCtx.undeliveredFailure) {
+			// The tool-result callback it was held for answers a history Pi has
+			// just replaced; the conversation's next request starts afresh.
+			debug(`${event}: dropping a terminal failure held for a tool-result callback`);
+			queryCtx.undeliveredFailure = null;
+		}
 	}
 	debug(event + ": marking Claude session for rebuild");
 	markSessionForRebuild({ reason: "history-replaced", forceRotate: restarts });
@@ -986,6 +989,14 @@ function streamRequestInLane(
 		return stream;
 	}
 
+	// Pi retrying a turn after it replaced the history (historyReplacedAfterQuery)
+	// restarts it the way a running query restarts on replaced history. The
+	// prompt rides on the context, so an account retry of this request repeats it.
+	if (!hostResumed && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !options?.signal?.aborted) {
+		debug("provider: a tool result after Pi replaced the history of an ended query; restarting the turn on the new history");
+		context = restartContext(context);
+	}
+
 	// --- Orphaned tool result (e.g. user aborted a tool call) ---
 	// The query is gone but pi still delivered the result. Report the failure
 	// that ended the query after this tool turn, if one did (never an abort);
@@ -1136,6 +1147,7 @@ function streamRequestInLane(
 	ctx().userInputNeedsRebuild = false;
 	ctx().committedOutput = false;
 	ctx().piHistoryReplaced = false;
+	ctx().historyReplacedAfterQuery = false;
 	ctx().reportedHistoryRestartDecline = false;
 	ctx().servedToolsSettling = null;
 	// A foreign-conversation one-shot sets it below once syncSharedSession has
@@ -1904,7 +1916,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 				}
 				// Re-entries continue THIS lane's conversation: never re-select it
 				// (requestLaneFor), which could move a fork's retry elsewhere.
-				for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart), restart.options, restart.timing))) reentryStream.push(event);
+				for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart.context), restart.options, restart.timing))) reentryStream.push(event);
 				reentryStream.end();
 				return;
 			}
