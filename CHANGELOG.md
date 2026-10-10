@@ -12,8 +12,8 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 ### Fixed
 
 - **Ending a session no longer leaves a Claude Code process waiting forever.**
-  - **Before:** a tool batch whose every result says `terminate` (pi-subagents' `structured_output`, for example) ends Pi's run while Claude Code still waits for those results. If the session then ended (`/new`, `/resume`, `/reload`, or a foreground subagent closing), Pi had no run to cancel and the bridge dropped the query without closing it, so its Claude Code process kept running until Pi exited.
-  - **Now:** when a session ends, the bridge closes each of its queries that is waiting on Pi. A reply that is still streaming is left to finish.
+  - **Before:** a tool batch whose every result says `terminate` (pi-subagents' `structured_output`, for example) ends Pi's run while Claude Code still waits for those results. If the session then ended (`/new`, `/resume`, `/reload`, or a foreground subagent closing), Pi had no run to cancel and the bridge dropped the query without closing it, so its Claude Code process kept running until Pi exited. An RPC reload during a reply did the same once that reply asked for a tool.
+  - **Now:** when a session ends, the bridge closes each of its queries that is waiting on Pi. A reply that is still streaming finishes, and its query closes if the reply ends at a tool call.
 
 - **A turn continues after Pi compacts on "Prompt is too long".**
   - **Before:** when a tool result pushed Claude's request over the context limit, the query ended with the overflow error. Pi then compacted and retried the turn from that tool result, but with no query left to deliver it to, the bridge treated it as a result from a cancelled call and ended the turn with nothing. The agent stopped right after the compaction.

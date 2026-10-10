@@ -303,6 +303,11 @@ export class QueryContext {
 	/** Pi replaced the history while this query was active. Its next callback
 	 *  must use the new context instead of resuming the stale Claude session. */
 	piHistoryReplaced = false;
+	/** Its Pi session ended while it still streamed a reply (an RPC reload
+	 *  does not wait for one). The reply may finish, but no callback can reach
+	 *  the query once its lane is gone, so it closes when the reply ends at a
+	 *  tool call (endToolUseTurn). */
+	sessionEnded = false;
 	/** Pi replaced the history after this lane's query ended. A request that
 	 *  then ends at a tool result is Pi retrying the turn (an overflow: the
 	 *  query died on "Prompt is too long" and Pi compacted), which no query

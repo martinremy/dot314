@@ -578,6 +578,7 @@ export function endToolUseTurn(c: QueryContext): void {
 	c.currentPiStream.push({ type: "done", reason: "toolUse", message });
 	c.currentPiStream.end();
 	c.currentPiStream = null;
+	if (c.sessionEnded) c.onRequestAbort?.();
 }
 
 export function cancelScheduledToolUseEnd(c: QueryContext): void {

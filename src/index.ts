@@ -1577,7 +1577,9 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const requestRotation = (failure: ClaudeAttemptFailure): boolean => {
 		recordAttemptFailure(failure);
 		const committed = abortCtx.committedOutput || attemptBuffer?.hasCommittedOutput === true;
-		const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
+		// A retry would start a query of a session that ended, in a lane nothing
+		// can call back into.
+		const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && !abortCtx.sessionEnded && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
 		debug("provider: account rotation decision", JSON.stringify({
 			eligible,
 			account: account?.label,
@@ -2053,9 +2055,16 @@ export default function (pi: ExtensionAPI) {
 			// ends the run while Claude Code still waits for those results. No
 			// callback can reach it once its lane is gone, so its child would wait
 			// until Pi exits. A query still streaming to Pi (an RPC reload does
-			// not wait for the reply) is left to finish it.
+			// not wait for the reply) finishes the reply first and closes if it
+			// ends at a tool call; it leaves the record now, since the lane goes.
 			for (const queryCtx of sessionQueryContexts(sessionId)) {
-				if (!queryCtx.activeQuery || queryCtx.currentPiStream) continue;
+				if (!queryCtx.activeQuery) continue;
+				if (queryCtx.currentPiStream) {
+					queryCtx.sessionEnded = true;
+					debug(`session_shutdown: a query of session ${sessionId.slice(0, 8)} is still streaming; it closes if its reply ends at a tool call`);
+					queryCtx.detachedFromSharedSession = true;
+					continue;
+				}
 				debug(`session_shutdown: closing a Claude Code query still in session ${sessionId.slice(0, 8)}`);
 				queryCtx.onRequestAbort?.();
 			}
