@@ -13,12 +13,13 @@ import * as piAi from "@earendil-works/pi-ai";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
-import { PROVIDER_ID } from "./convert.ts";
+import { PROVIDER_ID, lastConversationIndex } from "./convert.ts";
 import { extractUserPrompt, extractUserPromptBlocks, slashLed } from "./user-prompt.ts";
+import { leadingSystemCount, systemPromptNotes, type SystemNotes } from "./system-notes.ts";
 import { buildModels, modelDisplayName } from "./models.ts";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.ts";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.ts";
-import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCalls, isForkLane, laneInUse, peekCtx, releaseForkLane, requestLaneFor, strandedToolCallResult, summarizeDroppedUserMessages, takeQueuedOrParkedResult, toolCallDrainCause, type ClaimedToolCall, type DeferredUserMessage, type QueryRestartRequest, type ToolUseIdClaim } from "./query-state.ts";
+import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCalls, idleForHostResume, isForkLane, laneInUse, peekCtx, releaseForkLane, requestLaneFor, sessionQueryContexts, strandedToolCallResult, summarizeDroppedUserMessages, takeQueuedOrParkedResult, toolCallDrainCause, type ClaimedToolCall, type DeferredUserMessage, type QueryRestartRequest, type ToolUseIdClaim } from "./query-state.ts";
 import { answersKnownCall, deliverSteerBeforeResults, resolveToolResults } from "./tool-result-delivery.ts";
 import { abortSdkQuery, closeSdkQuery, teardownQuery } from "./query-teardown.ts";
 import { loadConfig, recordProjectTrust } from "./config.ts";
@@ -28,7 +29,7 @@ import { CLAUDE_CODE_TOOL_USE_ID, ServedToolServer, type ServedToolHandler } fro
 import { resolveGetModels } from "./pi-ai-compat.ts";
 import { contentShape, debug, diagDump, makeCliDebugOptions, moduleInstanceId, parseErrorShape } from "./debug.ts";
 import { logVersions } from "./versions.ts";
-import { noteAnomaly, takeAgentNotice } from "./agent-notice.ts";
+import { noteAnomaly, notePromptSource, takeAgentNotice } from "./agent-notice.ts";
 import { preflightClaudeExecutable, resolveClaudeExecutable } from "./claude-executable.ts";
 import { connectorsEnabledFor, isChildExecutedTool } from "./connectors.ts";
 import { appendIntegrityEntry, argKeyCount, argKeys, deleteSharedSessionLane, getExtensionApi, getSharedSession, markSessionForRebuild, noteReloadWithLiveWriter, recordStartedLane, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, takeReloadWithLiveWriter, takeStartedLane, type RebuildMark, type SessionState } from "./bridge-state.ts";
@@ -55,10 +56,11 @@ import {
 import { BRIDGE_ACCOUNT_HOST } from "./account-host.ts";
 import { registerBridgeCommands } from "./bridge-commands.ts";
 import { consumeQuery, emitRateLimitEvent, type ClaudeAttemptFailure } from "./consume-query.ts";
-import { buildClaudeQueryOptions } from "./query-options.ts";
+import { buildClaudeQueryOptions, outboundSystemPrompt } from "./query-options.ts";
 import { sdkQuery as startSdkQuery } from "./sdk-query.ts";
 import { UserMessageLedger, type ClassifyOptions } from "./user-message-ledger.ts";
 import { currentRequestLaneId, runInRequestLane } from "./request-lane.ts";
+import { piSessionCwd, type SystemPromptOrigin } from "./pi-sessions.ts";
 import { attachRequestTiming, startRequestTiming, type RequestTiming } from "./request-timing.ts";
 
 // Re-exports: the module decomposition must not change the entry's public
@@ -133,6 +135,15 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 // Deliberately NOT Symbol.for: rotation state rides options between the retry
 // re-entry and the original call within ONE module instance only.
 const ROTATION_STATE_KEY = Symbol("claude-bridge:rotationState");
+// A host that runs this bridge itself and can resume a turn across its own
+// restart (isHostResumedTurn) finds HOST_RESUME_MARKER on the API object the
+// extension was given, and sets HOST_RESUMED_TURN in the stream options of
+// such a request. Pi does neither.
+const HOST_RESUME_MARKER = Symbol.for("kendex.pi.claude-bridge.host-resume.v1");
+const HOST_RESUMED_TURN = Symbol.for("kendex.pi.claude-bridge.host-resumed-turn.v1");
+/** A host-resumed turn's prompt. Never part of the host's history: the
+ *  record's cursor and digests cover the host's messages only. */
+const HOST_RESUMED_PROMPT = "Continue from the completed tool results above; do not repeat completed tool calls.";
 
 /** Hard cap on account-rotation attempts per request (CHANGELOG 3.0.0). */
 const MAX_ROTATION_ATTEMPTS = 16;
@@ -147,6 +158,7 @@ interface RotationRequestState {
 
 type BridgeStreamOptions = SimpleStreamOptions & {
 	[ROTATION_STATE_KEY]?: RotationRequestState;
+	[HOST_RESUMED_TURN]?: boolean;
 };
 
 // MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
@@ -594,10 +606,10 @@ function applyProviderRegistration(trigger: string): void {
 
 export const HISTORY_REPLACED_PROMPT = "The conversation above was rewritten by Pi (compaction or history navigation). It is the complete current history, including the results of every tool call that has already run. Continue the turn from there, and do not repeat a tool call whose result is already above.";
 
-function restartContext(request: QueryRestartRequest): Context {
+function restartContext(context: Context): Context {
 	return {
-		...request.context,
-		messages: [...request.context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }],
+		...context,
+		messages: [...context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }],
 	};
 }
 
@@ -610,12 +622,15 @@ export function onPiHistoryReplaced(event: "session_compact" | "session_tree"): 
 	const restarts = running && !queryCtx.detachedFromSharedSession;
 	if (running) {
 		if (restarts) queryCtx.piHistoryReplaced = true;
-		reportToolResultMismatch(queryCtx, event, process.cwd(), { expectedInterruption: restarts });
-	} else if (queryCtx.undeliveredFailure) {
-		// The tool-result callback it was held for answers a history Pi has
-		// just replaced; the conversation's next request starts afresh.
-		debug(`${event}: dropping a terminal failure held for a tool-result callback`);
-		queryCtx.undeliveredFailure = null;
+		reportToolResultMismatch(queryCtx, event, piSessionCwd(currentRequestLaneId()), { expectedInterruption: restarts });
+	} else {
+		queryCtx.historyReplacedAfterQuery = true;
+		if (queryCtx.undeliveredFailure) {
+			// The tool-result callback it was held for answers a history Pi has
+			// just replaced; the conversation's next request starts afresh.
+			debug(`${event}: dropping a terminal failure held for a tool-result callback`);
+			queryCtx.undeliveredFailure = null;
+		}
 	}
 	debug(event + ": marking Claude session for rebuild");
 	markSessionForRebuild({ reason: "history-replaced", forceRotate: restarts });
@@ -673,13 +688,37 @@ function verifiedHeldSuffix(
  *  The request joins its lane's running query only as that query's own
  *  callback; anything else runs as a query of its own (requestLaneFor). */
 export function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const laneId = requestLaneFor(options?.sessionId, context.messages, (lane) => runInRequestLane(lane, () => isForeignConversation(getSharedSession(), context.messages)));
-	return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options));
+	const hostResumed = isHostResumedTurn(options, context.messages);
+	if (hostResumed) debug(`provider: host-resumed turn (session ${options!.sessionId!.slice(0, 8)}): its query ended with the host; continuing from ${context.messages.length} messages`);
+	const laneId = hostResumed ? options!.sessionId : requestLaneFor(options?.sessionId, context.messages, (lane) => runInRequestLane(lane, () => isForeignConversation(getSharedSession(), context.messages)));
+	return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, undefined, hostResumed));
+}
+
+/** Whether this request continues a turn whose query died with its host: the
+ *  host says so (HOST_RESUMED_TURN), the request is not cancelled, its context
+ *  ends in a result for every tool call of the assistant message before them
+ *  and nothing else, and no query of this process is in its lane or made one
+ *  of those calls. Such a request runs in its own lane and starts a fresh
+ *  query on a rebuilt session instead of taking the orphaned-result path,
+ *  which ends the turn. */
+function isHostResumedTurn(options: SimpleStreamOptions | undefined, messages: Context["messages"]): boolean {
+	const sessionId = options?.sessionId;
+	if ((options as BridgeStreamOptions | undefined)?.[HOST_RESUMED_TURN] !== true || sessionId === undefined || options?.signal?.aborted) return false;
+	const end = lastConversationIndex(messages);
+	let assistant = end;
+	while (assistant >= 0 && messages[assistant].role === "toolResult") assistant--;
+	const turn = messages[assistant];
+	if (turn?.role !== "assistant" || assistant === end) return false;
+	const calls = turn.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []);
+	const results = messages.slice(assistant + 1, end + 1).map((message) => (message as { toolCallId?: unknown }).toolCallId);
+	return calls.length === results.length && calls.every((id) => results.includes(id)) && idleForHostResume(sessionId, messages);
 }
 
 /** `inherited`: a re-entry (restart, account retry) answers on another
- *  request's Pi stream, so its phases go to that request's timing record. */
-function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions, inherited?: RequestTiming): AssistantMessageEventStream {
+ *  request's Pi stream, so its phases go to that request's timing record.
+ *  `hostResumed`: isHostResumedTurn granted the request (an account retry
+ *  repeats it). */
+function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions, inherited?: RequestTiming, hostResumed = false): AssistantMessageEventStream {
 	// The lane this request runs in, for callbacks that fire OUTSIDE it: an
 	// AbortSignal listener runs in the aborter's async context, not ours.
 	const laneId = currentRequestLaneId();
@@ -713,7 +752,7 @@ function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options
 	const stream = newAssistantMessageEventStream();
 	const timing = inherited ?? startRequestTiming(stream, laneId, model.id, context.messages.length);
 	try {
-		return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing);
+		return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed);
 	} catch (error) {
 		releaseEphemeralLane();
 		if (!inherited) timing?.settle("threw");
@@ -729,10 +768,11 @@ function streamRequestInLane(
 	releaseEphemeralLane: () => void,
 	stream: AssistantMessageEventStream,
 	timing: RequestTiming | undefined,
+	hostResumed: boolean,
 ): AssistantMessageEventStream {
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
-	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? piSessionCwd(options?.sessionId);
 	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}`);
 
 	// --- Tool result delivery ---
@@ -950,6 +990,14 @@ function streamRequestInLane(
 		return stream;
 	}
 
+	// Pi retrying a turn after it replaced the history (historyReplacedAfterQuery)
+	// restarts it the way a running query restarts on replaced history. The
+	// prompt rides on the context, so an account retry of this request repeats it.
+	if (!hostResumed && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !options?.signal?.aborted) {
+		debug("provider: a tool result after Pi replaced the history of an ended query; restarting the turn on the new history");
+		context = restartContext(context);
+	}
+
 	// --- Orphaned tool result (e.g. user aborted a tool call) ---
 	// The query is gone but pi still delivered the result. Report the failure
 	// that ended the query after this tool turn, if one did (never an abort);
@@ -958,12 +1006,14 @@ function streamRequestInLane(
 	// same Pi run (its signal) that answers a call of the failed query is this
 	// callback even when it ends in a user message; a rebuild then owns the
 	// steer. A later run's new prompt of the same shape still starts fresh.
-	const lastMsg = context.messages[context.messages.length - 1];
+	// A host-resumed turn's query died with its host, so nothing else will
+	// continue the turn: it starts a fresh query instead (isHostResumedTurn).
+	const lastMsg = context.messages[lastConversationIndex(context.messages)];
 	const heldForRun = ctx().undeliveredFailure;
 	const steeredResultId = lastMsg?.role !== "toolResult" && heldForRun && options?.signal && !options.signal.aborted && heldForRun.runSignals.has(options.signal)
 		? extractAllToolResults(context).map((result) => result.toolCallId).find((id) => id !== undefined && heldForRun.toolCallIds.has(id))
 		: undefined;
-	if (lastMsg?.role === "toolResult" || steeredResultId !== undefined) {
+	if (!hostResumed && (lastMsg?.role === "toolResult" || steeredResultId !== undefined)) {
 		if (timing) {
 			timing.kind = "continuation";
 			attachRequestTiming(ctx(), timing);
@@ -1098,6 +1148,7 @@ function streamRequestInLane(
 	ctx().userInputNeedsRebuild = false;
 	ctx().committedOutput = false;
 	ctx().piHistoryReplaced = false;
+	ctx().historyReplacedAfterQuery = false;
 	ctx().reportedHistoryRestartDecline = false;
 	ctx().servedToolsSettling = null;
 	// A foreign-conversation one-shot sets it below once syncSharedSession has
@@ -1205,22 +1256,42 @@ function streamRequestInLane(
 
 	const accountScope = accountSessionScope(account);
 	const cursorBeforeSync = getSharedSession()?.cursor ?? null;
+	// A host-resumed turn rebuilds Claude's session from every message, its
+	// tool results included, and prompts with HOST_RESUMED_PROMPT. The new
+	// session takes a new id: the host's killed Claude Code child may still be
+	// writing the old transcript.
+	if (hostResumed) markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
+	const syncMessages: Context["messages"] = hostResumed
+		? [...context.messages, { role: "user", content: HOST_RESUMED_PROMPT, timestamp: Date.now() }]
+		: context.messages;
+	// The system prompt this request would send for a history, for the notes
+	// that carry Pi's later system messages (system-notes.ts).
+	const systemNotes = systemPromptNotes(syncMessages, (messages) => outboundSystemPrompt({
+		queryModel, bridgeConfig, systemPrompt: getCurrentSystemPrompt(messages), systemPromptOrigin: systemPromptOrigin(messages, options),
+	}).prompt);
 	const fresh: FreshQuery = {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages, systemNotes,
 	};
 	// A forked rebuild awaits the SDK: by then the request may be cancelled, or
 	// a session shutdown may have ended its lane (a new context replaced this
 	// request's).
 	const requestEnded = (): boolean => options?.signal?.aborted === true || peekCtx() !== attemptCtx;
-	const synced = syncSharedSession(context.messages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
+	const synced = syncSharedSession(syncMessages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
 		cancelled: requestEnded,
 		customToolNameToPi,
+		systemNotes,
 	});
 	if (!(synced instanceof Promise)) return startFreshQuery(fresh, synced);
 	awaitForkedRebuild(fresh, synced, requestEnded);
 	return stream;
+}
+
+/** Where the system prompt Pi's system messages in `messages` render came from. */
+function systemPromptOrigin(messages: Context["messages"], options: SimpleStreamOptions | undefined): SystemPromptOrigin {
+	const sections = getCurrentSystemMessage(messages)?.sections;
+	return { preamble: sections && (sections.preamble ?? ""), sessionId: options?.sessionId, cacheRetention: options?.cacheRetention };
 }
 
 /** A fresh request's setup, handed from streamRequestInLane to the code that
@@ -1249,6 +1320,11 @@ interface FreshQuery {
 	claudeExecutablePreflight: ReturnType<typeof preflightClaudeExecutable> | undefined;
 	accountScope: ReturnType<typeof accountSessionScope>;
 	cursorBeforeSync: number | null;
+	hostResumed: boolean;
+	// What the Claude session is synced to: the context, and a host-resumed
+	// turn's prompt after it. The query's prompt is its tail from promptStart.
+	syncMessages: Context["messages"];
+	systemNotes: SystemNotes;
 }
 
 /**
@@ -1305,7 +1381,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages, systemNotes,
 	} = fresh;
 	const { sessionId: resumeSessionId, promptStart } = syncResult;
 	timing?.noteSync(syncResult.sync, Boolean(resumeSessionId));
@@ -1323,9 +1399,15 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	// so the record created by a Case-1 clean start is protected from the very
 	// next idle-window foreign query.
 	const conversationFp = foreignContext ? undefined : conversationFingerprint(context.messages);
-	const promptMessages = context.messages.slice(promptStart);
-	const promptBlocks = extractUserPromptBlocks(promptMessages);
-	let promptText = extractUserPrompt(promptMessages) ?? "";
+	const promptMessages = syncMessages.slice(promptStart);
+	// A session that holds Pi's later system messages as notes keeps the
+	// system prompt Pi's leading system messages render; one created before
+	// notes gets Pi's current prompt and no notes (SessionState.systemNotes).
+	// A foreign one-shot imports no history, so it has nowhere to hold notes.
+	const noted = !foreignContext && (!resumeSessionId || getSharedSession()?.systemNotes === true);
+	const promptNotes = noted ? systemNotes : undefined;
+	const promptBlocks = extractUserPromptBlocks(promptMessages, promptNotes);
+	let promptText = extractUserPrompt(promptMessages, promptNotes) ?? "";
 
 	// Guard: a prompt with no usable content means the last context message
 	// isn't a user message (or the batch was all-empty — joined batches turn ""
@@ -1366,19 +1448,15 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const mcpServers = servedTools ? { [MCP_SERVER_NAME]: servedTools.config } : undefined;
 	// Pure SDK query-option assembly — see buildClaudeQueryOptions for the
 	// connector, system-prompt, setting-source, effort, and env rationale.
-	const systemSections = getCurrentSystemMessage(context.messages)?.sections;
+	const systemMessages = noted ? context.messages.slice(0, leadingSystemCount(context.messages)) : context.messages;
 	const built = buildClaudeQueryOptions({
 		cwd,
 		requestedModel: model,
 		queryModel,
 		account,
 		bridgeConfig,
-		systemPrompt: getCurrentSystemPrompt(context.messages),
-		systemPromptOrigin: {
-			preamble: systemSections && (systemSections.preamble ?? ""),
-			sessionId: options?.sessionId,
-			cacheRetention: options?.cacheRetention,
-		},
+		systemPrompt: getCurrentSystemPrompt(systemMessages),
+		systemPromptOrigin: systemPromptOrigin(systemMessages, options),
 		reasoning: options?.reasoning,
 		resumeSessionId,
 		mcpServers,
@@ -1435,6 +1513,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	};
 	const persistSession = (next: SessionState | null): void => {
 		if (foreignContext || abortCtx.detachedFromSharedSession) return;
+		if (next && noted) next = { ...next, systemNotes: true };
 		const restartPending = Boolean(abortCtx.restartRequest);
 		let replaced = next;
 		// A mid-query user message the ledger could not identify is owned by
@@ -1515,7 +1594,9 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const requestRotation = (failure: ClaudeAttemptFailure): boolean => {
 		recordAttemptFailure(failure);
 		const committed = abortCtx.committedOutput || attemptBuffer?.hasCommittedOutput === true;
-		const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
+		// A retry would start a query of a session that ended, in a lane nothing
+		// can call back into.
+		const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && !abortCtx.sessionEnded && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
 		debug("provider: account rotation decision", JSON.stringify({
 			eligible,
 			account: account?.label,
@@ -1854,7 +1935,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 				}
 				// Re-entries continue THIS lane's conversation: never re-select it
 				// (requestLaneFor), which could move a fork's retry elsewhere.
-				for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart), restart.options, restart.timing))) reentryStream.push(event);
+				for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart.context), restart.options, restart.timing))) reentryStream.push(event);
 				reentryStream.end();
 				return;
 			}
@@ -1883,7 +1964,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 			const retryStream = runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, {
 				...(options ?? {}),
 				[ROTATION_STATE_KEY]: rotationState,
-			} as BridgeStreamOptions, timing));
+			} as BridgeStreamOptions, timing, hostResumed));
 			// End exactly once per outcome. Ending in a `finally` ran on
 			// the throw path too, BEFORE the .catch below could push its error
 			// event — and EventStream.push is a silent no-op after end, so a failed
@@ -1955,7 +2036,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => {
-		recordStartedLane(ctx.sessionManager, ctx.sessionManager.getSessionId());
+		recordStartedLane(ctx.sessionManager, ctx.sessionManager.getSessionId(), ctx.cwd);
 		recordProjectTrust(ctx);
 		setPiUI(ctx.ui);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
@@ -1986,6 +2067,24 @@ export default function (pi: ExtensionAPI) {
 			if (event.reason === "reload" && (laneInUse(sessionId) || getSharedSession()?.forceRotate === true)) {
 				noteReloadWithLiveWriter(ctx.sessionManager);
 			}
+			// Pi cancels a running turn before the session ends, but a query can
+			// outlive its run: a tool batch whose every result says terminate
+			// ends the run while Claude Code still waits for those results. No
+			// callback can reach it once its lane is gone, so its child would wait
+			// until Pi exits. A query still streaming to Pi (an RPC reload does
+			// not wait for the reply) finishes the reply first and closes if it
+			// ends at a tool call; it leaves the record now, since the lane goes.
+			for (const queryCtx of sessionQueryContexts(sessionId)) {
+				if (!queryCtx.activeQuery) continue;
+				if (queryCtx.currentPiStream) {
+					queryCtx.sessionEnded = true;
+					debug(`session_shutdown: a query of session ${sessionId.slice(0, 8)} is still streaming; it closes if its reply ends at a tool call`);
+					queryCtx.detachedFromSharedSession = true;
+					continue;
+				}
+				debug(`session_shutdown: closing a Claude Code query still in session ${sessionId.slice(0, 8)}`);
+				queryCtx.onRequestAbort?.();
+			}
 			cancelScheduledSessionPersistence(ctx.sessionManager);
 			clearSession("session_shutdown");
 			releaseProviderTokens("session_shutdown");
@@ -1994,8 +2093,10 @@ export default function (pi: ExtensionAPI) {
 		deleteQueryLane(sessionId);
 	});
 	// With agentNotices on, the anomalies this session's requests hit
-	// since its last prompt, as one message after the user's prompt
-	// (agent-notice.ts).
+	// since its last prompt, as one message after the user's prompt, for a
+	// session a person types into only (agent-notice.ts). Pi fires input
+	// before before_agent_start for the same prompt.
+	pi.on("input", (event, ctx) => notePromptSource(ctx.sessionManager.getSessionId(), event.source === "interactive" && ctx.hasUI));
 	pi.on("before_agent_start", (_event, ctx) => takeAgentNotice(ctx.sessionManager.getSessionId()));
 	pi.on("message_end", (event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => {
 		const message = (event as { message?: AssistantMessage }).message;
@@ -2019,4 +2120,5 @@ export default function (pi: ExtensionAPI) {
 	// reload always no-ops, so it never overwrites the parent's streamSimple nor
 	// steals ownership. See PRIMARY_INSTANCE_KEY / ACTIVE_STREAM_SIMPLE_KEY.
 	applyProviderRegistration("load");
+	(pi as unknown as Record<symbol, unknown>)[HOST_RESUME_MARKER] = true;
 }

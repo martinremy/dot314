@@ -216,14 +216,18 @@ export async function consumeQuery(
 				break;
 			case "assistant": {
 				// Claude Code emits a synthetic assistant text block carrying friendly
-				// rate/auth error copy before the SDK throws. On a managed attempt it
-				// is not model output: forwarding it would commit the stream and make
-				// safe pre-output account failover impossible, so hold it as failure
-				// metadata (with or without a live stream). A legacy attempt renders
-				// it exactly as before.
+				// rate/auth error copy before the SDK throws. It is not model output:
+				// forwarding it would commit the stream, which makes safe pre-output
+				// account failover impossible and stops a host's model fallback, and
+				// the error that follows repeats the same text. So every attempt holds
+				// it as failure metadata (with or without a live stream).
 				const sdkError = (message as any).error;
-				if (sdkError && account) {
-					if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: String(sdkError) });
+				if (sdkError) {
+					// The notice is the error the user sees when no throw follows; the
+					// error token only classifies it.
+					const content = (message as any).message?.content;
+					const notice = (Array.isArray(content) ? content : []).flatMap((block: any) => block?.type === "text" && block.text ? [block.text] : []).join("\n").trim();
+					if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: notice || String(sdkError) });
 					break;
 				}
 				if (!streamLive && !queryCtx.turnSawToolCall) break;
@@ -237,15 +241,20 @@ export async function consumeQuery(
 				// rejected rate limit) means the query ultimately SUCCEEDED: the
 				// failure was informational and must neither surface an error after
 				// the answer nor skip session persistence.
-				if (failure && message.subtype === "success" && queryCtx.committedOutput) {
+				// A legacy attempt never commits (no RetryEventBuffer), so there the
+				// visible output is its rendered blocks, and only a result that is not
+				// itself the error (is_error) recovered.
+				const legacyRecovered = !account && !(message as any).is_error && queryBlocks(queryCtx).length > 0;
+				if (failure && message.subtype === "success" && (queryCtx.committedOutput || legacyRecovered)) {
 					debug(`consumeQuery: clearing informational ${failure.kind ?? "unclassified"} failure — query recovered with committed output`);
 					holdFailure(undefined);
 				}
 				// The SDK can label the synthetic friendly error carrier as a
-				// successful result immediately before its iterator throws. Once a
-				// managed attempt holds a terminal failure signal, that text is still
-				// error metadata, not assistant output.
-				if (account && failure) break;
+				// successful result immediately before its iterator throws. Once an
+				// attempt holds a terminal failure signal, that text is still
+				// error metadata, not assistant output. A legacy attempt still reads
+				// a non-success result below: its copy is the fuller error.
+				if (failure && (message.subtype === "success" || account)) break;
 				if (!queryCtx.turnSawStreamEvent && message.subtype === "success") {
 					if (!streamLive) break;
 					const text = message.result || "";

@@ -197,6 +197,7 @@ let clock = Date.now();
 const stamp = () => clock++;
 const user = (text) => ({ role: "user", content: text, timestamp: stamp() });
 const customAsUser = (text) => ({ role: "user", content: [{ type: "text", text }], timestamp: stamp() });
+const reply = (text) => ({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: stamp() });
 const toolResult = (id, text = `result ${id}`) => ({ role: "toolResult", toolCallId: id, toolName: SLOW.name, content: [{ type: "text", text }], isError: false, timestamp: stamp() });
 const systemMessage = (content, tools = []) => ({ role: "system", content, ...(tools.length ? { toolsAdded: tools } : {}), timestamp: 0 });
 
@@ -594,7 +595,7 @@ const SHAPES = {
 			yield* text("pruned done");
 			yield { type: "result", subtype: "success" };
 		});
-		const earlier = [user("earlier-one"), user("earlier-two")];
+		const earlier = [user("earlier-one"), reply("earlier reply")];
 		const initial = [systemMessage("sys", [SLOW]), ...earlier, user(PARENT_PROMPT)];
 		const first = await collect(streamClaudeAgentSdk(model, { messages: initial }, { sessionId }));
 		await intrude();
@@ -610,7 +611,7 @@ const SHAPES = {
 			yield* text("replaced done");
 			yield { type: "result", subtype: "success" };
 		});
-		const initial = [systemMessage("sys", [SLOW]), user("earlier"), user(PARENT_PROMPT)];
+		const initial = [systemMessage("sys", [SLOW]), user("earlier"), reply("earlier reply"), user(PARENT_PROMPT)];
 		await collect(streamClaudeAgentSdk(model, { messages: initial }, { sessionId }));
 		await intrude();
 		const events = await collect(streamClaudeAgentSdk(model, { messages: [initial[0], user("Summary so far"), toolResult("c1"), user("STEER-REPLACED")] }, { sessionId }));
@@ -1223,7 +1224,8 @@ describe("a foreign call while the conversation's lane is idle", () => {
 		});
 
 		it(`finished before the next prompt, it leaves the idle conversation's query state alone (${label})`, BOUNDED, async () => {
-			installFakeClaudeCode((prompt) => prompt === REVIEWER_PROMPT ? reviewerScript : mainTurnScript(prompt));
+			// The reviewer's context and prompt arrive as one prompt: it has no reply to resume from.
+			installFakeClaudeCode((prompt) => prompt.endsWith(REVIEWER_PROMPT) ? reviewerScript : mainTurnScript(prompt));
 			let history = [systemMessage("main system"), user(MAIN_TURN(1))];
 			const turn1 = await collect(streamClaudeAgentSdk(model, { messages: history }, { sessionId }));
 			history = [...history, turn1.at(-1).message];
@@ -1258,7 +1260,7 @@ describe("a foreign call while the conversation's lane is idle", () => {
 					yield { type: "result", subtype: "success" };
 				};
 				// Claude Code hands Pi a call, then stops waiting for it and ends.
-				if (prompt === FOREIGN_TOOL_PROMPT) return async function* () {
+				if (prompt.endsWith(FOREIGN_TOOL_PROMPT)) return async function* () {
 					yield* toolMessage("f1", [{ id: "foreign-call", tool: "inspect", args: { id: "f" } }]);
 					yield { type: "result", subtype: "success" };
 				};

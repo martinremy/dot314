@@ -342,6 +342,62 @@ describe("legacy sessions (no account router)", () => {
 		assert.equal(sharedSession?.sessionId, "session-legacy");
 		assert.equal(sharedSession?.needsRebuild, undefined);
 	});
+
+	// Claude Code reports a limit as a synthetic assistant message, then a
+	// success-labelled error result, then (usually) the iterator throws with
+	// the same text. Streamed as a reply, it showed twice and counted as model
+	// output.
+	const notice = "You've hit your limit · resets 5pm";
+	const carrier = { type: "assistant", error: "rate_limit", parent_tool_use_id: null, message: { id: "s1", model: "<synthetic>", role: "assistant", content: [{ type: "text", text: notice }], stop_reason: "stop_sequence", usage: { input_tokens: 0, output_tokens: 0 } } };
+	const failed = {
+		"the iterator throws": [{ type: "result", subtype: "success", is_error: true, result: notice }, new Error(`Claude Code returned an error result: ${notice}`)],
+		"no throw follows": [{ type: "result", subtype: "success", is_error: true, result: notice }],
+	};
+	for (const [name, ending] of Object.entries(failed)) {
+		it(`keeps Claude Code's failure notice off the stream and reports it once, as the error, when ${name}`, async () => {
+			__testSetSdkQueryFactory(() => fakeSdkQuery([{ type: "system", subtype: "init", session_id: "session-legacy" }, carrier, ...ending], "legacy", observedState()));
+			const events = await collect(streamClaudeAgentSdk(model, context, { sessionId: "legacy-synthetic" }));
+			assert.deepEqual(events.map((event) => event.type), ["error"]);
+			assert.ok(events[0].error.errorMessage.includes(notice), events[0].error.errorMessage);
+			assert.deepEqual(events[0].error.content, []);
+		});
+	}
+
+	it("reports a non-success result's own copy after the notice", async () => {
+		__testSetSdkQueryFactory(() => fakeSdkQuery([
+			{ type: "system", subtype: "init", session_id: "session-legacy" },
+			carrier,
+			{ type: "result", subtype: "error_during_execution", errors: ["You've hit your weekly limit · resets Thursday 4am"] },
+		], "legacy", observedState()));
+		const events = await collect(streamClaudeAgentSdk(model, context, { sessionId: "legacy-synthetic-limit" }));
+		assert.deepEqual(events.map((event) => event.type), ["error"]);
+		assert.match(events[0].error.errorMessage, /weekly limit/);
+	});
+
+	it("completes a reply that recovers after the notice, with no error", async () => {
+		__testSetSdkQueryFactory(() => fakeSdkQuery([
+			{ type: "system", subtype: "init", session_id: "session-legacy" },
+			carrier,
+			...COMPLETED_TEXT("recovered"),
+			{ type: "result", subtype: "success", result: "recovered" },
+		], "legacy", observedState()));
+		const events = await collect(streamClaudeAgentSdk(model, context, { sessionId: "legacy-synthetic-recovery" }));
+		assert.deepEqual(textEvents(events), ["recovered"]);
+		assert.equal(events.filter((event) => event.type === "error").length, 0);
+		assert.equal(events.filter((event) => event.type === "done").length, 1);
+	});
+
+	it("still reports the notice when the error result follows partial text", async () => {
+		__testSetSdkQueryFactory(() => fakeSdkQuery([
+			{ type: "system", subtype: "init", session_id: "session-legacy" },
+			...STREAMED_TEXT("partial answer"),
+			carrier,
+			{ type: "result", subtype: "success", is_error: true, result: notice },
+		], "legacy", observedState()));
+		const events = await collect(streamClaudeAgentSdk(model, context, { sessionId: "legacy-synthetic-partial" }));
+		assert.equal(events.at(-1).type, "error");
+		assert.ok(events.at(-1).error.errorMessage.includes(notice), events.at(-1).error.errorMessage);
+	});
 });
 
 describe("managed account stream rotation", () => {
@@ -426,6 +482,27 @@ describe("managed account stream rotation", () => {
 		assert.equal(events.filter((event) => event.type === "error").length, 0);
 		assert.equal(observed.rateLimits.length, 1);
 		assert.deepEqual(observed.successes, ["a"]);
+	});
+
+	it("still rotates a held rate limit whose attempt only started an empty text block", async () => {
+		const observed = observedState();
+		globalThis[CLAUDE_ACCOUNT_ROUTER_SYMBOL] = makeRouter(observed);
+		let calls = 0;
+		__testSetSdkQueryFactory(() => {
+			calls += 1;
+			return calls === 1
+				? fakeSdkQuery([
+					{ type: "system", subtype: "init", session_id: "session-a" },
+					{ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: new Date(Date.now() + 60_000).toISOString() } },
+					...STREAMED_TEXT("").slice(0, 2),
+					{ type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+					{ type: "result", subtype: "success", is_error: true, result: "You've hit your limit" },
+				], "a", observed)
+				: fakeSdkQuery([{ type: "system", subtype: "init", session_id: "session-b" }, { type: "result", subtype: "success", result: "ok-from-b" }], "b", observed);
+		});
+		const events = await collect(streamClaudeAgentSdk(model, context, { sessionId: "managed-empty-block" }));
+		assert.equal(calls, 2);
+		assert.deepEqual(textEvents(events), ["ok-from-b"]);
 	});
 
 	it("rotates on a pre-output network failure", async () => {

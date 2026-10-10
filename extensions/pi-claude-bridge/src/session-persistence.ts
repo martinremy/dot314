@@ -5,13 +5,15 @@ import { closeSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFi
 import { dirname, resolve as pathResolve } from "path";
 import { REBUILD_MARKS, getExtensionApi, getSharedSession, reportSyntheticToolResultRepair, safeNotify, setSharedSession, type RebuildMark, type SessionState } from "./bridge-state.ts";
 import { displayPath } from "./config.ts";
-import { convertPiMessages } from "./convert.ts";
+import { convertPiMessages, lastConversationIndex } from "./convert.ts";
 import { debug, diagDump, diagGuidance, parseErrorShape } from "./debug.ts";
 import { noteAnomaly } from "./agent-notice.ts";
 import { UNVERIFIED_HISTORY_DIGEST, historyDigest, sharedHistoryMatches } from "./history-digest.ts";
 import { forkNativePrefix, planNativePrefix, type ForkedPrefix, type NativePrefix } from "./native-fork.ts";
 import { stepEnd, stepStart, type SyncTiming } from "./request-timing.ts";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.ts";
+import { INTERRUPTED_MARKER, promptRunStart } from "./user-prompt.ts";
+import type { SystemNotes } from "./system-notes.ts";
 import {
 	findUnpairedToolUses,
 	insertLostToolResultPlaceholders,
@@ -245,6 +247,7 @@ export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?
 			...(REBUILD_MARKS.includes(persisted.rebuildReason as RebuildMark) ? { rebuildReason: persisted.rebuildReason } : {}),
 		} : {}),
 		...(persisted.forceRotate === true ? { forceRotate: true } : {}),
+		...(persisted.systemNotes === true ? { systemNotes: true } : {}),
 		...(accountProfileId ? { accountProfileId, claudeConfigDir } : {}),
 	});
 	debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}, account=${accountProfileId ?? "default"}`);
@@ -347,8 +350,9 @@ function convertAndImportMessages(
 	messages: Context["messages"],
 	customToolNameToSdk?: Map<string, string>,
 	cwd?: string,
+	systemNotes?: SystemNotes,
 ): void {
-	const { anthropicMessages, sanitizedIds, notedTurns } = convertPiMessages(messages, customToolNameToSdk, { noteUnreplayableTurns: true });
+	const { anthropicMessages, sanitizedIds, notedTurns } = convertPiMessages(messages, customToolNameToSdk, { noteUnreplayableTurns: true, systemNotes });
 	if (notedTurns.length > 0) {
 		const calls = notedTurns.flatMap((turn) => turn.calls);
 		debug(`convertAndImportMessages: ${notedTurns.length} trailing Claude turn(s) with unsigned thinking imported as a note, carrying ${calls.length} tool call(s):`, calls.map((call) => `${call.name} [${call.id}]`).join(", "));
@@ -431,6 +435,11 @@ export interface SyncOptions {
 	// resolveMcpTools), the one its stream names Pi's tool calls with. A
 	// forked rebuild compares Claude Code's tool calls to Pi's through it.
 	customToolNameToPi?: Map<string, string>;
+	// The notes for Pi's later system messages (system-notes.ts). A rebuild
+	// that imports Pi's whole history writes them where Pi holds those
+	// messages and marks the new session as holding them (`systemNotes`); a
+	// fork does so only from a session that already held them.
+	systemNotes?: SystemNotes;
 }
 
 export interface IncrementalPromptBatchPlan {
@@ -451,7 +460,7 @@ export function planIncrementalPromptBatch(
 	cursor: number,
 ): IncrementalPromptBatchPlan | undefined {
 	const lastIndex = messages.length - 1;
-	if (lastIndex < 0 || (messages[lastIndex] as { role?: string }).role !== "user") return undefined;
+	if ((messages[lastConversationIndex(messages)] as { role?: string } | undefined)?.role !== "user") return undefined;
 
 	// A cursor past the end is PROOF this messages array is not the conversation
 	// the cursor describes (e.g. another conversation's short context arriving
@@ -463,10 +472,14 @@ export function planIncrementalPromptBatch(
 	}
 	const boundedCursor = Math.max(0, cursor);
 	let promptStart = boundedCursor;
-	if ((messages[promptStart] as { role?: string } | undefined)?.role === "assistant") promptStart++;
+	let reply = promptStart;
+	while ((messages[reply] as { role?: string } | undefined)?.role === "system") reply++;
+	if ((messages[reply] as { role?: string } | undefined)?.role === "assistant") promptStart = reply + 1;
 
 	const pendingPrompts = messages.slice(promptStart);
-	if (pendingPrompts.length === 0 || pendingPrompts.some((message) => (message as { role?: string }).role !== "user")) {
+	const pendingRoles = pendingPrompts.map((message) => (message as { role?: string }).role);
+	const userMessageCount = pendingRoles.filter((role) => role === "user").length;
+	if (userMessageCount === 0 || pendingRoles.some((role) => role !== "user" && role !== "system")) {
 		// Log the rejected tail so a diag log can tell apart "two assistants in
 		// tail" vs "toolResult in tail" vs "stale cursor" without a repro.
 		debug(`planIncrementalPromptBatch: rejected — cursor=${cursor} promptStart=${promptStart} tail roles=[${messages.slice(boundedCursor).map((m) => (m as { role?: string }).role).join(", ")}]`);
@@ -475,7 +488,7 @@ export function planIncrementalPromptBatch(
 
 	return {
 		promptStart,
-		userMessageCount: pendingPrompts.length,
+		userMessageCount,
 	};
 }
 
@@ -589,7 +602,10 @@ export function syncSharedSession(
 	options: SyncOptions = {},
 ): SyncResult | Promise<SyncResult> {
 	const sharedSession = getSharedSession();
-	const priorMessages = messages.slice(0, -1); // everything before the current user prompt
+	// Everything before this query's prompt. A rebuild imports it and the
+	// prompt delivers the rest (user-prompt.ts promptRunStart).
+	const promptStart = promptRunStart(messages);
+	const priorMessages = messages.slice(0, promptStart);
 	const accountProfileId = account?.accountProfileId;
 	const scopeConfigDir = account?.claudeConfigDir; // resolved dir for managed, undefined for legacy
 	// What cc-session-io reads/writes. Managed requests always carry a resolved
@@ -637,7 +653,7 @@ export function syncSharedSession(
 			`(cursor=${sharedSession.cursor}, priors=${priorMessages.length}) — clean one-shot, record untouched`,
 		);
 		debug(`syncResult: path=foreign-one-shot cause=foreign-conversation`);
-		return { sessionId: null, promptStart: messages.length - 1, foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
+		return { sessionId: null, promptStart: lastConversationIndex(messages), foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
 	}
 
 	// Why the REUSE check below failed, when it ran.
@@ -696,7 +712,7 @@ export function syncSharedSession(
 	if (priorMessages.every((message) => message.role === "system")) {
 		debug(`Case 1: clean start, ${messages.length} total messages, account=${accountProfileId ?? "default"}`);
 		debug(`syncResult: path=clean-start cause=clean-start${mark ? ` mark=${mark}` : ""}`);
-		return { sessionId: null, promptStart: messages.length - 1, sync: { path: "clean-start", cause: "clean-start", ...(mark ? { mark } : {}) } };
+		return { sessionId: null, promptStart, sync: { path: "clean-start", cause: "clean-start", ...(mark ? { mark } : {}) } };
 	}
 	const replacedSessionId = sharedSession?.sessionId;
 	// Preserve a UUID only within the same credential profile: reusing account
@@ -716,11 +732,11 @@ export function syncSharedSession(
 		: sharedSession?.needsRebuild ? "needs-rebuild"
 		: digestCause ?? "missed-messages";
 	if (previousSessionId !== undefined && options.fork !== false) {
-		const plan = planNativePrefix(priorMessages, previousSessionId, cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi);
+		const plan = planNativePrefix(priorMessages, previousSessionId, cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi, sharedSession?.systemNotes ? options.systemNotes : undefined);
 		if ("prefix" in plan) {
 			return rebuildFromNativePrefix(plan.prefix, {
 				messages, cwd, customToolNameToSdk, modelId, account, options,
-				sharedSession: sharedSession!, claudeDir, preserveId, cause, mark, previousCursor, incomingFingerprint,
+				sharedSession: sharedSession!, claudeDir, preserveId, cause, mark, previousCursor, incomingFingerprint, promptStart,
 			});
 		}
 		debug(`Case 4: no native prefix to fork from ${previousSessionId.slice(0, 8)} (${plan.reason}) — importing all ${priorMessages.length} pi msgs`);
@@ -736,7 +752,8 @@ export function syncSharedSession(
 		...(preserveId ? { sessionId: previousSessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
-	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
+	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd, options.systemNotes);
+	endOnAssistant(session);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd, claudeDir);
 	stepEnd("rebuildWrite", writeStarted);
@@ -750,6 +767,8 @@ export function syncSharedSession(
 		...(incomingFingerprint ? { conversationFingerprint: incomingFingerprint } : {}),
 		...(accountProfileId ? { accountProfileId } : {}),
 		...(scopeConfigDir ? { claudeConfigDir: scopeConfigDir } : {}),
+		// Even an empty map marks the session: its next prompt carries notes.
+		...(options.systemNotes ? { systemNotes: true } : {}),
 	});
 	if (replacedSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.messages.length} records`);
@@ -766,9 +785,24 @@ export function syncSharedSession(
 	debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${replacedSessionId === undefined ? "first" : !sameAccount ? "account-rotated" : preserveId ? "preserved" : "rotated-post-abort"} cause=${cause}${mark ? ` mark=${mark}` : ""} missed=${missed}`);
 	return {
 		sessionId: session.sessionId,
-		promptStart: messages.length - 1,
+		promptStart,
 		sync: { path: "rebuild", cause, ...(mark ? { mark } : {}), priors: priorMessages.length, missed },
 	};
+}
+
+/** Ends a rebuilt transcript on an assistant record where it would end on a
+ *  user-side one (a tool result, an imported note). Claude Code resumes such
+ *  a transcript with a synthetic "No response requested." reply, which Claude
+ *  reads as its own. Claude Code (2.1.288) leaves a virtual assistant record
+ *  out of the request, so Claude gets the tool result and this query's prompt
+ *  as one user turn, as Pi's own Anthropic provider sends them.
+ *  tests/int-esc-resume.mjs checks that against the installed Claude Code.
+ *  `before` holds the records that precede the session's own (a fork's). */
+function endOnAssistant(session: ReturnType<typeof createSession>, before: readonly JsonlRecord[] = []): void {
+	const turns = [...before, ...session.records].filter((record) => record.type === "user" || record.type === "assistant");
+	if (turns.at(-1)?.type !== "user") return;
+	session.addAssistantMessage([{ type: "text", text: INTERRUPTED_MARKER }], { model: "<synthetic>" });
+	Object.assign(session.records.at(-1)!, { isVirtual: true });
 }
 
 /** Writes a session file that must not exist yet: the fork's id is new, and
@@ -805,6 +839,7 @@ interface ForkRebuildContext {
 	mark?: string;
 	previousCursor: number;
 	incomingFingerprint?: string;
+	promptStart: number;
 }
 
 /**
@@ -821,7 +856,7 @@ interface ForkRebuildContext {
  * by another program, and a full import is today's correct result.
  */
 async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildContext): Promise<SyncResult> {
-	const priorMessages = c.messages.slice(0, -1);
+	const priorMessages = c.messages.slice(0, c.promptStart);
 	const oldId = prefix.oldSessionId.slice(0, 8);
 	const replan = (why: string): SyncResult => {
 		debug(`Case 4: ${why} — syncing again without a fork`);
@@ -839,7 +874,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		debug(`syncResult: path=rebuild cancelled cause=${c.cause}${c.mark ? ` mark=${c.mark}` : ""}`);
 		return {
 			sessionId: null,
-			promptStart: c.messages.length - 1,
+			promptStart: c.promptStart,
 			cancelled: true,
 			sync: { path: "rebuild", cause: c.cause, ...(c.mark ? { mark: c.mark } : {}), priors: priorMessages.length },
 		};
@@ -857,7 +892,9 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		sessionId: forked.sessionId,
 		...(c.modelId ? { model: c.modelId } : {}),
 	});
-	if (tail.length > 0) convertAndImportMessages(session, tail, c.customToolNameToSdk, c.cwd);
+	const systemNotes = c.sharedSession.systemNotes ? c.options.systemNotes : undefined;
+	if (tail.length > 0) convertAndImportMessages(session, tail, c.customToolNameToSdk, c.cwd, systemNotes);
+	endOnAssistant(session, forked.entries as JsonlRecord[]);
 	// The import starts a chain of its own. It must hang off the fork's leaf,
 	// which is often an attachment: chained from the last message instead, the
 	// attachments after it would fall off the chain and out of the request.
@@ -886,6 +923,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		...(c.incomingFingerprint ? { conversationFingerprint: c.incomingFingerprint } : {}),
 		...(accountProfileId ? { accountProfileId } : {}),
 		...(scopeConfigDir ? { claudeConfigDir: scopeConfigDir } : {}),
+		...(systemNotes ? { systemNotes: true } : {}),
 	});
 	const newId = forked.sessionId.slice(0, 8);
 	const appended = priorMessages.length - prefix.piCount;
@@ -901,7 +939,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 	debug(`syncResult: path=rebuild sessionId=${forked.sessionId} priors=${priorMessages.length} ${c.preserveId ? "preserved" : "rotated-post-abort"} cause=${c.cause}${c.mark ? ` mark=${c.mark}` : ""} missed=${missed} forked=${prefix.piCount} from=${oldId} forkedRecords=${forked.entries.length} appended=${appended}`);
 	return {
 		sessionId: forked.sessionId,
-		promptStart: c.messages.length - 1,
+		promptStart: c.promptStart,
 		sync: { path: "rebuild", cause: c.cause, ...(c.mark ? { mark: c.mark } : {}), priors: priorMessages.length, missed, forked: prefix.piCount },
 	};
 }

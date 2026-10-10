@@ -153,18 +153,19 @@ export function deliveredSuffix(
 }
 
 /** REUSE check for a shared record: Pi's messages before the record's cursor
- *  must match its digest, and when the prompt starts one past the cursor (Pi
- *  appended the reply the record's query delivered), that reply must be what
- *  the bridge delivered. Converting a message list and then one trailing
- *  assistant equals converting them together, so the two digests are checked
- *  separately. A digested record without a reply digest cannot vouch for that
- *  assistant, so it does not match. */
+ *  must match its digest, and when Pi appended the reply the record's query
+ *  delivered between the cursor and the prompt (after any system messages),
+ *  that reply must be what the bridge delivered. Converting a message list
+ *  and then one trailing assistant equals converting them together, so the
+ *  two digests are checked separately. A digested record without a reply
+ *  digest cannot vouch for that assistant, so it does not match. */
 export function sharedHistoryMatches(
 	record: { cursor: number; historyDigest?: string; trailingAssistantDigest?: string },
 	messages: Context["messages"],
 	promptStart: number,
 ): { matches: boolean; checked: boolean } {
 	const prior = historyDigestMatches(record.historyDigest, messages.slice(0, record.cursor));
-	if (!prior.matches || !prior.checked || promptStart !== record.cursor + 1) return prior;
-	return { matches: record.trailingAssistantDigest === historyDigest(messages.slice(record.cursor, promptStart)), checked: true };
+	const reply = messages.slice(record.cursor, promptStart);
+	if (!prior.matches || !prior.checked || !reply.some((message) => message.role === "assistant")) return prior;
+	return { matches: record.trailingAssistantDigest === historyDigest(reply), checked: true };
 }

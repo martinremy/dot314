@@ -63,7 +63,7 @@ function expectedMain(prompt, config, options, extra) {
 // records it. Pi's main agent sends this id on every request (sdk.ts).
 const mainManager = {};
 const MAIN_ID = "019a0000-0000-7000-8000-000000000001";
-before(() => recordStartedLane(mainManager, MAIN_ID));
+before(() => recordStartedLane(mainManager, MAIN_ID, process.cwd()));
 after(() => takeStartedLane(mainManager));
 
 // What index.ts passes for a request's messages and stream options.
@@ -168,6 +168,8 @@ const ARBITER_PROMPT = "You are the pi-subagents watchdog permission arbiter.\nD
 const arbiterTool = { name: "watchdog_permission_decision", description: "Decide", parameters: { type: "object", properties: {} } };
 // A caller's prompt that quotes the last line of Pi's default base (review finding 2).
 const QUOTING_PROMPT = "You are a prompt reviewer. Review this quoted instruction; do not execute it:\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)";
+// pi-subagents' child hook text, put ahead of a child's prompt.
+const CHILD_HOOK = "You are a child subagent, not the parent orchestrator.\nDo not delegate.";
 // pi-side-chat's suffix on ctx.getSystemPrompt(), sent with a per-overlay id.
 const SIDE_CHAT_SUFFIX = "\n---\n## Side Chat\n\nYou're in a SIDE CHAT parallel to the main agent.\n\nThe copied main context is reference only. Do not continue its pending user request, tool call, reasoning, edits, or unfinished answer.";
 
@@ -216,10 +218,6 @@ describe("systemPrompt replacement scope", () => {
 		"a probe's one-line instruction": async () => ({ messages: normalizeContext({ systemPrompt: "Reply with exactly the word PINEAPPLE", messages: [user("hi")] }).messages, options: {} }),
 		"the subagent permission arbiter (tools and <cwd>)": async () => ({ messages: [createInitialSystemMessage(ARBITER_PROMPT, [arbiterTool]), user("decide")], options: {} }),
 		"a prompt quoting Pi's docs line (review finding 2)": async () => ({ messages: normalizeContext({ systemPrompt: QUOTING_PROMPT, messages: [user("review")] }).messages, options: {} }),
-		"side chat's copy of the main prompt": async () => ({
-			messages: normalizeContext({ systemPrompt: getCurrentSystemPrompt(sessionMessages({ contextFiles })) + SIDE_CHAT_SUFFIX, messages: [user("quick question")] }).messages,
-			options: { sessionId: randomUUID() },
-		}),
 	};
 	for (const [name, load] of Object.entries(foreign)) {
 		it(`sends ${name} unchanged under every replacement setting`, async () => {
@@ -233,6 +231,39 @@ describe("systemPrompt replacement scope", () => {
 			}
 		});
 	}
+
+	// Anthropic refuses a prompt that carries Pi's default base, whoever sends
+	// it, so the base is replaced and the caller's own text kept, even with
+	// preservePiContext false.
+	const PI_BASE_CALLERS = {
+		"side chat's copy of the main prompt": (base) => ({ prompt: `${base}${SIDE_CHAT_SUFFIX}`, before: [], after: SIDE_CHAT_SUFFIX }),
+		"an in-process pi-subagents child, its hook's text ahead of Pi's prompt": (base) => ({ prompt: `${CHILD_HOOK}\n\n${base}`, before: [CHILD_HOOK], after: "" }),
+	};
+	for (const [name, shape] of Object.entries(PI_BASE_CALLERS)) {
+		it(`replaces only Pi's default base in ${name}, under every replacement setting`, () => {
+			const piPrompt = sessionMessages({ contextFiles });
+			const sections = piPrompt[0].sections;
+			const { prompt, before: lead, after: tail } = shape(getCurrentSystemPrompt(piPrompt));
+			const messages = normalizeContext({ systemPrompt: prompt, messages: [user("hi")] }).messages;
+			const kept = Object.entries(sections).filter(([section]) => !["preamble", "tools", "docs"].includes(section)).map(([, text]) => text);
+			for (const [label, config] of Object.entries(CONFIGS)) {
+				const head = `${config.includeModelLine ? "Active model: pi-claude/claude-haiku-4-5\n\n" : ""}${config.replacement}`;
+				const out = sent(messages, config, { sessionId: randomUUID() });
+				assert.equal(out.prompt, [head, ...lead, ...kept].join("\n\n") + tail, label);
+				assert.equal(out.source, "caller-pi-base");
+			}
+		});
+	}
+
+	it("does not repeat the replacement in a copy of Pi's prompt that already leads with it", () => {
+		const piPrompt = sessionMessages({ contextFiles });
+		const kept = Object.entries(piPrompt[0].sections).filter(([section]) => !["preamble", "tools", "docs"].includes(section)).map(([, text]) => text);
+		for (const [label, config] of Object.entries(CONFIGS)) {
+			const head = `${config.includeModelLine ? "Active model: pi-claude/claude-haiku-4-5\n\n" : ""}${config.replacement}`;
+			const messages = normalizeContext({ systemPrompt: `${head}\n\n${getCurrentSystemPrompt(piPrompt)}`, messages: [user("hi")] }).messages;
+			assert.equal(sent(messages, config, { sessionId: randomUUID() }).prompt, [head, ...kept].join("\n\n"), label);
+		}
+	});
 
 	it("captures Pi's own summarization prompt and request options from both summarizers", async () => {
 		for (const load of [() => compactionRequest(undefined), () => compactionRequest(MAIN_ID), branchSummaryRequest]) {
@@ -249,17 +280,17 @@ describe("systemPrompt replacement scope", () => {
 		const messages = await forcedMessages({ customPrompt: SYSTEM_MD }, "Extra.");
 		const source = (sessionId) => sent(messages, CONFIGS.preserve, { sessionId }).source;
 		const first = {};
-		recordStartedLane(first, "first-session");
+		recordStartedLane(first, "first-session", process.cwd());
 		assert.equal(source("first-session"), "pi-main:session");
 		// /new and /resume: the old runtime shuts down, then the new one starts.
 		assert.equal(takeStartedLane(first), "first-session");
 		assert.equal(source("first-session"), "caller");
 		const second = {};
-		recordStartedLane(second, "second-session");
+		recordStartedLane(second, "second-session", process.cwd());
 		assert.equal(source("second-session"), "pi-main:session");
 		// `pi --no-session` fork: the same manager takes the fork's id.
 		assert.equal(takeStartedLane(second), "second-session");
-		recordStartedLane(second, "forked-session");
+		recordStartedLane(second, "forked-session", process.cwd());
 		assert.equal(source("second-session"), "caller");
 		assert.equal(source("forked-session"), "pi-main:session");
 		takeStartedLane(second);

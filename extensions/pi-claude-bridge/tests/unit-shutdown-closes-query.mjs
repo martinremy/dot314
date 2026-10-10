@@ -1,0 +1,101 @@
+// A query can outlive the Pi run that started it: a tool batch whose every
+// result says terminate (pi-subagents' structured_output) ends the run while
+// Claude Code still waits for those results, and an RPC reload ends the
+// session without waiting for a reply still streaming. Once the session's
+// lane is gone no callback reaches the query, so the bridge must close it or
+// the Claude Code child waits until Pi exits.
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, it } from "node:test";
+
+import claudeBridge, { __testSetBridgeIntegrityState, __testSetSdkQueryFactory, streamClaudeAgentSdk } from "../src/index.ts";
+import { setExtensionApi } from "../src/bridge-state.ts";
+import { resetStack } from "../src/query-state.ts";
+
+const model = { id: "claude-haiku-4-5", api: "claude-bridge", provider: "pi-claude", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+const tool = { name: "echo", description: "Return a value", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } };
+const SESSION = "shutdown-session";
+const system = { role: "system", content: "Pi instructions", toolsAdded: [tool], timestamp: 0 };
+const prompt = { role: "user", content: "run echo", timestamp: 1 };
+
+let root;
+let handlers;
+let ctx;
+let closed;
+let isClosed;
+let midReply;
+beforeEach(() => {
+	root = mkdtempSync(join(tmpdir(), "bridge-shutdown-"));
+	Object.assign(process.env, { CLAUDE_CONFIG_DIR: root, CLAUDE_CODE_OAUTH_TOKEN: "offline-test", CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT: "0" });
+	resetStack();
+	__testSetBridgeIntegrityState({ sharedSession: null, ui: { notify() {} } });
+	handlers = new Map();
+	claudeBridge({ on: (event, handler) => handlers.set(event, handler), registerCommand() {}, registerProvider() {}, registerTool() {}, events: { emit() {} }, appendEntry() {} });
+	const sessionManager = { getSessionId: () => SESSION, getCwd: () => root, getEntries: () => [], buildSessionContext: () => ({ messages: [] }) };
+	ctx = { sessionManager, cwd: root, ui: { notify() {} } };
+	closed = Promise.withResolvers();
+	isClosed = false;
+	midReply = null;
+	// Claude asks for echo, then waits for its result until the query is
+	// closed. With midReply set, it first streams text and holds the reply open.
+	__testSetSdkQueryFactory(({ options }) => {
+		const gate = Promise.withResolvers();
+		return {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "system", subtype: "init", session_id: "11111111-1111-4111-8111-111111111111" };
+				if (midReply) {
+					yield { type: "assistant", message: { content: [{ type: "text", text: "working on it" }] } };
+					await midReply.promise;
+				}
+				yield { type: "assistant", message: { content: [{ type: "tool_use", id: "t0", name: "mcp__custom-tools__echo", input: { id: "t0" } }] } };
+				void options.mcpServers["custom-tools"].instance._registeredTools.echo.handler({ id: "t0" }, {});
+				await gate.promise;
+			},
+			close() { isClosed = true; closed.resolve(); gate.resolve(); },
+			async interrupt() { gate.resolve(); },
+		};
+	});
+});
+
+afterEach(() => {
+	__testSetSdkQueryFactory();
+	setExtensionApi(undefined);
+	__testSetBridgeIntegrityState({ sharedSession: null, ui: null });
+	resetStack();
+	for (const key of ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT"]) delete process.env[key];
+	rmSync(root, { recursive: true, force: true });
+});
+
+async function closedWithin(ms) {
+	let timer;
+	const leftRunning = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("the Claude Code query was left running")), ms); });
+	try { await Promise.race([closed.promise, leftRunning]); } finally { clearTimeout(timer); }
+}
+
+for (const reason of ["new", "reload", "quit"]) {
+	it(`closes a query still waiting for a tool result when the session ends (${reason})`, { timeout: 10_000 }, async () => {
+		handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const events = [];
+		// The run's signal never aborts: the run already ended.
+		for await (const event of streamClaudeAgentSdk(model, { messages: [system, prompt] }, { sessionId: SESSION, signal: new AbortController().signal })) events.push(event);
+		assert.equal(events.at(-1).reason, "toolUse");
+		handlers.get("session_shutdown")({ type: "session_shutdown", reason }, ctx);
+		await closedWithin(1000);
+	});
+}
+
+it("lets a reply still streaming at the session end finish, then closes its query at the tool call", { timeout: 10_000 }, async () => {
+	midReply = Promise.withResolvers();
+	handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+	const iterator = streamClaudeAgentSdk(model, { messages: [system, prompt] }, { sessionId: SESSION, signal: new AbortController().signal })[Symbol.asyncIterator]();
+	const events = [];
+	while (!events.some((event) => event.type === "text_delta")) events.push((await iterator.next()).value);
+	handlers.get("session_shutdown")({ type: "session_shutdown", reason: "reload" }, ctx);
+	assert.equal(isClosed, false, "the reply was cut off");
+	midReply.resolve();
+	for (let next = await iterator.next(); !next.done; next = await iterator.next()) events.push(next.value);
+	assert.equal(events.at(-1).reason, "toolUse");
+	await closedWithin(1000);
+});

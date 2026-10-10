@@ -61,11 +61,11 @@ after(() => {
 const streamEvent = (event) => ({ type: "stream_event", event });
 
 // Streams Pi's main request through the bridge and returns the system prompt
-// the SDK query received.
-async function capturedSystemPrompt(messages) {
+// and prompt the SDK query received.
+async function capturedQuery(messages) {
 	const captured = [];
-	__testSetSdkQueryFactory(({ options }) => {
-		captured.push(options.systemPrompt.prompt);
+	__testSetSdkQueryFactory(({ prompt, options }) => {
+		captured.push({ system: options.systemPrompt.prompt, prompt: String(prompt) });
 		return {
 			async *[Symbol.asyncIterator]() {
 				yield { type: "system", subtype: "init", session_id: "fake-prompt-rules" };
@@ -87,6 +87,8 @@ async function capturedSystemPrompt(messages) {
 	assert.equal(captured.length, 1);
 	return captured[0];
 }
+
+const capturedSystemPrompt = async (messages) => (await capturedQuery(messages)).system;
 
 describe("systemPrompt replacement keeps Pi's rules", () => {
 	it("sends the replacement, Pi's rules with tool and extension guidelines, and what follows <docs>", { timeout: 10_000 }, async () => {
@@ -112,24 +114,31 @@ describe("systemPrompt replacement keeps Pi's rules", () => {
 		}
 	});
 
-	// Pi replays a section patch by name and appends a section it re-adds, so a
-	// session that starts on its own base and switches to Pi's default renders
-	// preamble, project_context, cwd, tools, rules, docs.
-	it("keeps the sections Pi rendered before <tools> once a session switches to Pi's default base", { timeout: 10_000 }, async () => {
+	// A session keeps the system prompt it started with; Pi's switch to its
+	// default base reaches Claude as a note. Under the replacement that base
+	// drops Pi's preamble, <tools> and <docs>, so the note removes the base
+	// the session started on and carries the rules Pi added, nothing more.
+	it("keeps a session's first system prompt and notes the sections a switch to Pi's default base changes", { timeout: 10_000 }, async () => {
 		const contextFiles = [{ path: "/tmp/project/AGENTS.md", content: "Use tabs." }];
 		const options = { cwd: "/tmp/project", selectedTools: ["read", "bash"], toolSnippets: { read: "Read file contents", bash: "Execute bash commands" }, contextFiles };
 		const first = buildSystemPromptSections({ ...options, customPrompt: "My own base." });
 		const second = buildSystemPromptSections({ ...options, promptGuidelines: [EXTENSION_GUIDELINE] });
-		const prompt = await capturedSystemPrompt([
-			{ role: "system", content: "", sections: first, timestamp: 1 },
+		const leading = { role: "system", content: "", sections: first, timestamp: 1 };
+		const firstOnly = await capturedSystemPrompt([leading, { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 2 }]);
+		const { system, prompt } = await capturedQuery([
+			leading,
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 2 },
 			{ role: "system", content: "", sections: diffSystemPromptSections(first, second), timestamp: 3 },
 			{ role: "user", content: [{ type: "text", text: "again" }], timestamp: 4 },
 		]);
 
-		assert.equal(prompt, [REPLACEMENT, second.project_context, second.cwd, second.rules].join("\n\n"));
-		for (const dropped of ["<docs>", "</docs>", "<tools>", "</tools>", second.preamble, "My own base."]) {
-			assert.ok(!prompt.includes(dropped), `sent ${JSON.stringify(dropped)}`);
+		assert.equal(system, firstOnly, "the system prompt is the one the session started with");
+		const note = prompt.slice(prompt.indexOf("<system-reminder>"), prompt.indexOf("</system-reminder>"));
+		assert.ok(note.includes(`Updated system prompt section "rules":\n\n${second.rules}`));
+		assert.ok(note.includes(`Removed system prompt section "preamble".`));
+		for (const dropped of ["<docs>", "<tools>", "\"tools\"", "\"docs\"", second.preamble]) {
+			assert.ok(!note.includes(dropped), `noted ${JSON.stringify(dropped)}`);
 		}
+		assert.ok(prompt.endsWith("again"), "the note comes before the message after it");
 	});
 });

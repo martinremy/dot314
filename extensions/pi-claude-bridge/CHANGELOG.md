@@ -2,7 +2,87 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-10
+
+### Added
+
+- **Claude Haiku 5.5** (`pi-claude/claude-haiku-5-5`) is now in Pi's model menu, above Haiku 4.5.
+  - Claude Code serves it and Pi 1.1.0 lists it, but the bridge only offers models on its own list, so it was missing. Older Pi versions without it get the bridge's own metadata: 1M context, 128K output, text and images, xhigh and max effort, and no off or minimal thinking.
+
+### Fixed
+
+- **A change to Pi's system prompt no longer re-sends the whole conversation uncached.**
+  - **Before:** every query sent Claude Code Pi's current system prompt. When it changed mid-session (a subagent stage with a new output path, an extension that edits its tool descriptions, an edited AGENTS.md after `/reload`), the next request matched the cache only through the tool list and re-sent everything after it. On Oct 9–10 that cost 2.3M uncached tokens, up to 400k at a time.
+  - **Now:** a Claude Code session keeps the system prompt it started with. Pi records each later change as a system message, and the bridge sends it to Claude as a note before the next message, the way Pi's own Anthropic provider sends it, naming only the sections the bridge actually sends. A change only to Pi's tool list, which Claude gets as tool definitions anyway, sends nothing. Sessions started before this keep the old behavior until their next full rebuild or a new session.
+- **The first turn after Esc reads the prompt cache again.**
+  - **Before:** after an Esc the bridge copies Claude Code's own transcript into a new session, but it stopped copying at the first record it couldn't match to Pi's history. That happened at any message sent while Claude was working (a subagent notice, or something typed mid-turn), at any tool result with an image, at a failed tool's output that began or ended with whitespace, and at thinking an older Pi display extension had relabelled. Everything after that point was rewritten from Pi's copy, and the next request re-sent the whole conversation uncached. On Oct 9–10 that cost 200k–450k uncached tokens per Esc in long sessions.
+  - **Now:** each of those matches the way Claude Code stored it: a queued message against Pi's user message, an image by its place (Claude Code re-encodes it and adds a note naming the saved file), a failed result trimmed as Claude Code trims it, and thinking by its signature. Replayed on the 13 rebuilds from those two days, 12 copy all but the aborted turn, and a live probe reads the full cache on the turn after Esc.
+- **Ending a session no longer leaves a Claude Code process waiting forever.**
+  - **Before:** a tool batch whose every result says `terminate` (pi-subagents' `structured_output`, for example) ends Pi's run while Claude Code still waits for those results. If the session then ended (`/new`, `/resume`, `/reload`, or a foreground subagent closing), Pi had no run to cancel and the bridge dropped the query without closing it, so its Claude Code process kept running until Pi exited. An RPC reload during a reply did the same once that reply asked for a tool.
+  - **Now:** when a session ends, the bridge closes each of its queries that is waiting on Pi. A reply that is still streaming finishes, and its query closes if the reply ends at a tool call.
+
+- **A turn continues after Pi compacts on "Prompt is too long".**
+  - **Before:** when a tool result pushed Claude's request over the context limit, the query ended with the overflow error. Pi then compacted and retried the turn from that tool result, but with no query left to deliver it to, the bridge treated it as a result from a cancelled call and ended the turn with nothing. The agent stopped right after the compaction.
+  - **Now:** a retry that follows Pi replacing the history of an ended query starts a new query on the compacted history, with the same instruction a running query gets when its history is replaced: continue from the results above without repeating finished tool calls.
+
+- **A limit or rejection notice shows once, as the error, on a single Claude login.**
+  - **Before:** without managed accounts, Claude Code's own notice ("You've hit your limit · resets 5pm") streamed as Claude's reply, then the error repeated the same text. Because the notice counted as model output, a model-fallback extension saw a turn that had already answered and did not switch models.
+  - **Now:** the notice is held as failure details on every attempt, as managed accounts already did, so the turn ends with one error carrying the text and no reply.
+
+- **A foreground subagent in a worktree is told its own working directory.**
+  - **Before:** Pi does not tell a provider which directory a request belongs to, so the bridge started Claude Code in the Pi process's directory. pi-subagents runs a foreground child (`async: false`) inside the parent's process, so a child working in a worktree or another `cwd` had its Claude Code started in the parent's checkout. Claude Code's first prompt then told the model "Primary working directory" was the parent's checkout while Pi's prompt named the worktree. The bridge also saved that directory with the session, so reopening the child rebuilt Claude's session from scratch.
+  - **Now:** the bridge records each Pi session's directory when the session starts and starts that session's Claude Code there. It also reads that directory's `.pi/claude-bridge.json`, so a child in a trusted worktree uses the worktree's project settings rather than the parent checkout's. Pi itself and async subagents, which run in their own directory, see no change.
+
+## 2026-10-09
+
+### Fixed
+
+- **The first prompt of a conversation in a durable host reaches Claude as the prompt.**
+  - **Before:** a host that records each system prompt or tool change as a system message in the conversation writes one right after the input that starts a turn. The bridge took the last message as the input, so the first query of every conversation sent Claude a placeholder `[continue]` prompt with your text only as history, and told the agent about an `empty_prompt` anomaly, which it then repeated to you.
+  - **Now:** the bridge looks past those system messages wherever it reads the end of the conversation: the prompt, resuming a session, checking Claude's last reply, a tool result whose query is gone, a resumed turn, and choosing the request's lane. Pi writes no such messages, so nothing changes in Pi.
+
+## 2026-10-07
+
+### Added
+
+- **A host that restarts mid-turn can continue the turn.**
+  - **Before:** an app that runs the bridge inside its own durable host, rather than in Pi, could restart while Claude waited for a tool result. The query that made the call died with the host, so the request carrying the result took the orphaned-result path, and the turn ended with an empty reply after you approved the tool.
+  - **Now:** such a host marks that request as a resumed turn. The bridge rebuilds Claude's session under a new id from the whole conversation, tool results included, and asks Claude to continue from those results without repeating the calls. The turn gets a real reply, and the next prompt resumes the session warm. Pi never marks a request this way, so nothing changes in Pi.
+
+## 2026-10-05
+
+### Highlights
+
+- **Subagents on Claude models:** `delegate`, any other agent with `systemPromptMode: append`, an in-process subagent and side chat no longer fail with "Third-party apps now draw from your extra usage".
+
+### Fixed
+
+- **A subagent whose prompt adds to Pi's default one was refused as a third-party app.**
+  - **Before:** the replacement looked for Pi's default prompt only at the very start. pi-subagents puts its child instructions in front of Pi's prompt, so for an agent with `systemPromptMode: append` (the `delegate` agent) the bridge kept Pi's prompt whole, documentation line included, and Anthropic answered every request with "Third-party apps now draw from your extra usage".
+  - **Now:** Pi's default base is also recognized behind a hook's leading text, when Pi's opening sentence starts a paragraph, Pi's tool list comes right after it, and Pi's documentation section follows. The replacement takes the place of Pi's opening, tools and docs as usual, and the hook's text follows the replacement. (`a5f65a8`)
+- **An in-process subagent or side chat on Pi's default prompt was refused as a third-party app.**
+  - **Before:** the replacement applied only to sessions the bridge saw start. A subagent run in-process (`async: false`) does not load the bridge, and side chat sends a copy of Pi's prompt, so both went out with Pi's documentation line and every request was refused.
+  - **Now:** any prompt that carries Pi's complete default base has that base replaced, and the rest of the prompt is kept, even with `preservePiContext: false`. Prompts without Pi's base, like Pi's summaries and extensions' own calls, are still sent unchanged. (`98b3927`)
+
+## 2026-10-04
+
+### Highlights
+
+- **No more fake "No response requested." after Esc:** Claude no longer sees a reply it never wrote after you interrupt it, and no longer answers with that line itself. A message you resend after Esc reaches Claude once, not twice.
+
+### Fixed
+
+- **After an Esc, Claude saw a "No response requested." reply it never wrote.**
+  - **Before:** Pi drops a reply cut off by Esc, so the rebuild that follows left your unanswered message, or the aborted tool's result, last in Claude Code's transcript. Claude Code resumes such a transcript by inserting a synthetic "No response requested." reply. Claude read it as its own and now and then answered a later prompt with that exact line. When you resent a message after an Esc, Claude also got it twice, once before the fake reply and once after.
+  - **Now:** everything after Claude's last real reply goes in the prompt, with Claude Code's own `[Request interrupted by user]` where the reply was cut off. A rebuild that still ends on a tool result gets a placeholder that Claude Code leaves out of the request, so the result and your next message reach Claude together, as Pi's own Anthropic provider sends them. (`094dcfe`)
+
 ## 2026-10-03
+
+### Changed
+
+- **Agent notices went to subagents too.**
+  - **Before:** with `agentNotices` on, every Pi session whose requests hit an anomaly was told, subagents included. A subagent read a bridge notice in the middle of its task, while the session you were talking to never heard about it.
+  - **Now:** only a session you type into is told. Pi reports where each prompt came from, and a subagent's prompts never come from a person typing in a UI, whether it runs in-process, in the background or in a Herdr pane. Anomalies from subagents running in the same Pi process are passed on to your session, marked "In a subagent", once per kind. A subagent in another process is never told; its anomalies are in the bridge logs.
 
 ### Fixed
 

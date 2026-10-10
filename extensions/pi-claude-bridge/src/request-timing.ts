@@ -82,8 +82,14 @@ export class RequestTiming {
 	private readonly debugStart = debugWriteTotals();
 	private readonly startedAt: number;
 	private readonly sharedAtStart: boolean;
+	private readonly lane: string | undefined;
+	private readonly model: string;
+	private readonly msgs: number;
 
-	constructor(private readonly lane: string | undefined, private readonly model: string, private readonly msgs: number) {
+	constructor(lane: string | undefined, model: string, msgs: number) {
+		this.lane = lane;
+		this.model = model;
+		this.msgs = msgs;
 		const loop = loopStore();
 		this.startedAt = ++loop.started;
 		if (loop.live++ === 0) {

@@ -11,6 +11,7 @@ import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import type { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { isConnectorTool } from "./connectors.ts";
+import { lastConversationIndex } from "./convert.ts";
 import type { McpResult } from "./extract-tool-results.ts";
 import { currentRequestLaneId } from "./request-lane.ts";
 import { debug, diagDump } from "./debug.ts";
@@ -302,6 +303,16 @@ export class QueryContext {
 	/** Pi replaced the history while this query was active. Its next callback
 	 *  must use the new context instead of resuming the stale Claude session. */
 	piHistoryReplaced = false;
+	/** Its Pi session ended while it still streamed a reply (an RPC reload
+	 *  does not wait for one). The reply may finish, but no callback can reach
+	 *  the query once its lane is gone, so it closes when the reply ends at a
+	 *  tool call (endToolUseTurn). */
+	sessionEnded = false;
+	/** Pi replaced the history after this lane's query ended. A request that
+	 *  then ends at a tool result is Pi retrying the turn (an overflow: the
+	 *  query died on "Prompt is too long" and Pi compacted), which no query
+	 *  will continue, so it restarts the turn on the new history. */
+	historyReplacedAfterQuery = false;
 	reportedHistoryRestartDecline = false;
 	restartRequest: QueryRestartRequest | null = null;
 	latestCursor = 0;
@@ -1209,17 +1220,10 @@ export function requestLaneFor(
 	otherConversation: (laneId: string | undefined) => boolean = () => false,
 ): string | undefined {
 	const own = peekQueryContext(sessionId);
-	const ids = contextToolCallIds(messages);
-	if (ids.length > 0) {
-		if (own && handedToPi(own, ids)) return sessionId;
-		for (const [forkId, fork] of forkLaneStore()) {
-			if (fork.base !== sessionId) continue;
-			const forkCtx = peekQueryContext(forkId);
-			if (forkCtx && handedToPi(forkCtx, ids)) return forkId;
-		}
-	}
+	const callback = callbackLane(sessionId, messages);
+	if (callback !== null) return callback;
 	const reason = contextInUse(own) ? "its lane is busy"
-		: (messages.at(-1) as { role?: unknown } | undefined)?.role === "toolResult" ? "its tool result answers no call of its lane"
+		: (messages[lastConversationIndex(messages as Context["messages"])] as { role?: unknown } | undefined)?.role === "toolResult" ? "its tool result answers no call of its lane"
 		: otherConversation(sessionId) ? "its lane holds another conversation"
 		: undefined;
 	if (reason === undefined) return sessionId;
@@ -1227,6 +1231,30 @@ export function requestLaneFor(
 	forkLaneStore().set(forkId, { base: sessionId });
 	debug(`provider: request (session ${sessionId === undefined ? "none" : sessionId.slice(0, 8)}) is not its lane's callback and ${reason}; running it as its own query in ${forkId}`);
 	return forkId;
+}
+
+/** The lane (`sessionId`'s own, or a fork of it) whose query handed Pi a tool
+ *  call `messages` carries, running or ended: the request is that query's
+ *  callback. Null when there is none. */
+function callbackLane(sessionId: string | undefined, messages: ReadonlyArray<unknown>): string | undefined | null {
+	const ids = contextToolCallIds(messages);
+	if (ids.length === 0) return null;
+	const own = peekQueryContext(sessionId);
+	if (own && handedToPi(own, ids)) return sessionId;
+	for (const [forkId, fork] of forkLaneStore()) {
+		if (fork.base !== sessionId) continue;
+		const forkCtx = peekQueryContext(forkId);
+		if (forkCtx && handedToPi(forkCtx, ids)) return forkId;
+	}
+	return null;
+}
+
+/** Whether lane `sessionId` may take a host-resumed turn (index.ts
+ *  isHostResumedTurn): no query of this process is in it, and none of the
+ *  lane or its forks made a call `messages` carries. Such a query's callback
+ *  keeps its own path even when the query has ended (requestLaneFor). */
+export function idleForHostResume(sessionId: string, messages: ReadonlyArray<unknown>): boolean {
+	return !contextInUse(peekQueryContext(sessionId)) && callbackLane(sessionId, messages) === null;
 }
 
 /** The Pi session request lane `laneId` serves: a fork lane's base, else
@@ -1242,6 +1270,14 @@ export function isForkLane(laneId: string | undefined): boolean {
 
 export function releaseForkLane(laneId: string): void {
 	forkLaneStore().delete(laneId);
+}
+
+/** The query contexts of Pi session `sessionId`: its own lane's and each of
+ *  its fork lanes'. */
+export function sessionQueryContexts(sessionId: string): QueryContext[] {
+	const contexts = [peekQueryContext(sessionId)];
+	for (const [forkId, fork] of forkLaneStore()) if (fork.base === sessionId) contexts.push(peekQueryContext(forkId));
+	return contexts.filter((queryCtx) => queryCtx !== undefined);
 }
 
 /** Whether lane `laneId` is still in use: a query in it is running (the

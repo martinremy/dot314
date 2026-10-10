@@ -11,7 +11,7 @@ import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairin
  *  timing lines. */
 export const REBUILD_MARKS = [
 	"abort", "idle-timeout", "history-replaced", "history-rewritten", "user-unresolved",
-	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified",
+	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified", "host-resumed",
 ] as const;
 export type RebuildMark = typeof REBUILD_MARKS[number];
 
@@ -70,6 +70,12 @@ export interface SessionState {
 	// this — there's no concurrent CC writer during those events, so
 	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
+	// The Claude session holds Pi's later system messages as notes
+	// (system-notes.ts), and its system prompt is the one Pi's leading system
+	// messages render. Absent on a session created before notes: its queries
+	// send Pi's current system prompt until a rebuild that imports Pi's whole
+	// history, or a clean start, replaces it.
+	systemNotes?: boolean;
 }
 
 // Claude session state is scoped to Pi's provider `sessionId`. Parent and child
@@ -152,9 +158,9 @@ function startedLaneStore(): WeakMap<object, string> {
 	return store;
 }
 
-export function recordStartedLane(sessionManager: object, sessionId: string): void {
+export function recordStartedLane(sessionManager: object, sessionId: string, cwd: string): void {
 	startedLaneStore().set(sessionManager, sessionId);
-	notePiSessionStarted(sessionId);
+	notePiSessionStarted(sessionId, cwd);
 }
 
 /** The lane recorded at this manager's session_start, removed as it is read —

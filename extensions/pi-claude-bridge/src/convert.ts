@@ -5,6 +5,7 @@ import type { AssistantMessage, Message as PiMessage } from "@earendil-works/pi-
 import type { ContentBlock, Message as SessionMessage } from "cc-session-io";
 import { pascalCase } from "change-case";
 import { isChildExecutedTool } from "./connectors.ts";
+import type { SystemNotes } from "./system-notes.ts";
 
 export const PROVIDER_ID = "pi-claude";
 
@@ -126,8 +127,19 @@ function isClaudeAssistant(msg: PiMessage): msg is AssistantMessage {
 	return msg.role === "assistant" && (msg.provider === PROVIDER_ID || msg.api === "anthropic");
 }
 
-function isSkippedAssistant(msg: PiMessage): boolean {
+export function isSkippedAssistant(msg: PiMessage): boolean {
 	return msg.role === "assistant" && (msg.stopReason === "error" || msg.stopReason === "aborted");
+}
+
+/** The index of the conversation's last message, past the system messages
+ *  after it. Pi Durable records each change of the system prompt or tool set
+ *  as a system message where it happens: after the input that starts a turn,
+ *  or after a tool result. Such a message is no input, so whatever the
+ *  request answers ends before it. */
+export function lastConversationIndex(messages: readonly PiMessage[]): number {
+	let index = messages.length - 1;
+	while (index >= 0 && messages[index].role === "system") index--;
+	return index;
 }
 
 /** A Claude thinking block exactly as the API returned it, or undefined when
@@ -249,7 +261,7 @@ function unreplayedTurnNote(msg: AssistantMessage, results: Map<string, PiMessag
 export function convertPiMessages(
 	messages: PiMessage[],
 	customToolNameToSdk?: Map<string, string>,
-	opts: { noteUnreplayableTurns?: boolean } = {},
+	opts: { noteUnreplayableTurns?: boolean; systemNotes?: SystemNotes } = {},
 ): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string>; notedTurns: Array<{ calls: Array<{ id: string; name: string }> }> } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
@@ -348,6 +360,11 @@ export function convertPiMessages(
 				blocks.push(toolResultToAnthropicBlock(toolMsg, sanitizedIds));
 			}
 			if (blocks.length > 0) anthropicMessages.push({ role: "user", content: blocks });
+		} else if (msg.role === "system") {
+			// The note a query would have sent for it (system-notes.ts), as a
+			// record of its own where Pi holds it.
+			const note = opts.systemNotes?.get(msg);
+			if (note) anthropicMessages.push({ role: "user", content: [{ type: "text", text: note }] });
 		}
 	}
 

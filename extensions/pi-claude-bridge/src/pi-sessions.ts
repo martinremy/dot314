@@ -17,28 +17,39 @@ export interface SystemPromptOrigin {
 	cacheRetention?: string;
 }
 
-// Session ids of the Pi sessions started in this process, added at
-// session_start and removed at its session_shutdown (bridge-state's started
-// lanes). On globalThis because the two events can reach different module
-// instances (`/reload` mid-session, a child agent's own copy of the bridge).
-const LIVE_SESSIONS_SYMBOL = Symbol.for("kendex.pi.claude-bridge.live-pi-sessions.v1");
+// Session ids of the Pi sessions started in this process, each with its
+// working directory, added at session_start and removed at its
+// session_shutdown (bridge-state's started lanes). On globalThis because the
+// two events can reach different module instances (`/reload` mid-session, a
+// child agent's own copy of the bridge).
+const LIVE_SESSIONS_SYMBOL = Symbol.for("kendex.pi.claude-bridge.live-pi-sessions.v2");
 
-function liveSessions(): Set<string> {
+function liveSessions(): Map<string, string> {
 	const host = globalThis as Record<symbol, unknown>;
-	let sessions = host[LIVE_SESSIONS_SYMBOL] as Set<string> | undefined;
+	let sessions = host[LIVE_SESSIONS_SYMBOL] as Map<string, string> | undefined;
 	if (!sessions) {
-		sessions = new Set<string>();
+		sessions = new Map<string, string>();
 		host[LIVE_SESSIONS_SYMBOL] = sessions;
 	}
 	return sessions;
 }
 
-export function notePiSessionStarted(sessionId: string): void {
-	liveSessions().add(sessionId);
+export function notePiSessionStarted(sessionId: string, cwd: string): void {
+	liveSessions().set(sessionId, cwd);
 }
 
 export function notePiSessionEnded(sessionId: string): void {
 	liveSessions().delete(sessionId);
+}
+
+/** The working directory of the Pi session a request belongs to. Pi passes
+ *  providers no directory, and one process can run sessions in several:
+ *  pi-subagents runs a foreground child in the parent's process, in the child's
+ *  worktree. Claude Code tells the model the directory it starts in, so a query
+ *  started in the process's directory would name the parent's checkout. A
+ *  request from a session this process did not start uses the process's. */
+export function piSessionCwd(sessionId: string | undefined): string {
+	return (sessionId === undefined ? undefined : liveSessions().get(sessionId)) ?? process.cwd();
 }
 
 /**

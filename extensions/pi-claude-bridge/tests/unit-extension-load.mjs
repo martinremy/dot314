@@ -26,6 +26,10 @@ describe("loading the extension", () => {
 		assert.deepEqual(load().tools, []);
 	});
 
+	it("marks the API object for a host that resumes turns", () => {
+		assert.equal(load()[Symbol.for("kendex.pi.claude-bridge.host-resume.v1")], true);
+	});
+
 	it("answers /pi-claude incidents as an unknown argument", async () => {
 		const notices = [];
 		await load().commands.get("pi-claude").handler("incidents", { ui: { notify: (message, level) => notices.push([message, level]) }, cwd: process.cwd() });

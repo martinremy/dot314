@@ -29,27 +29,34 @@ const result = (toolCallId, toolName, text, isError = false) => ({ role: "toolRe
 
 /** Pi's history before the prompt that follows the abort. `result1` replaces
  *  the first tool result's text, and `signature1` the first thinking block's
- *  signature; `parallel` adds the turn with two parallel calls, whose first
+ *  signature; `image1` adds that base64 PNG to the first tool result;
+ *  `failure2` replaces the failed read's text; `labelThinking` wraps every
+ *  thinking text in the colored label an older Pi display extension wrote
+ *  into it; `parallel` adds the turn with two parallel calls, whose first
  *  result's text `result4` replaces; `steer` adds the user message Pi sent
  *  while that turn's calls ran, after their results. `prompt2` lists the
  *  texts of the user messages in a row that Pi holds for the second prompt,
- *  each a text block as Pi's convertToLlm makes of an extension's message. */
-export function piPriors({ prompt1 = PROMPT_1, result1 = "one\n", signature1 = "sig-a1", parallel = false, result4 = "two\n", steer, prompt2 } = {}) {
+ *  each a text block as Pi's convertToLlm makes of an extension's message,
+ *  or a message Pi holds among them as it is. */
+export function piPriors({ prompt1 = PROMPT_1, result1 = "one\n", signature1 = "sig-a1", image1, failure2 = "File not found: notes.md", labelThinking = false, parallel = false, result4 = "two\n", steer, prompt2 } = {}) {
+	const think = (text, signature) => thinking(labelThinking ? `\x1b[38;2;254;188;56mThinking:\x1b[39m \x1b[38;2;119;125;136m${text}\x1b[39m` : text, signature);
+	const first = result("toolu_fixture_1", "bash", result1);
+	if (image1) first.content.push({ type: "image", data: image1, mimeType: "image/png" });
 	return [
 		user(prompt1),
-		claude("toolUse", [thinking("Run it.", signature1), bash("toolu_fixture_1", "echo one")]),
-		result("toolu_fixture_1", "bash", result1),
+		claude("toolUse", [think("Run it.", signature1), bash("toolu_fixture_1", "echo one")]),
+		first,
 		claude("toolUse", [read("toolu_fixture_2", "notes.md")]),
-		result("toolu_fixture_2", "read", "File not found: notes.md", true),
+		result("toolu_fixture_2", "read", failure2, true),
 		...(parallel ? [
-			claude("toolUse", [thinking("Both.", "sig-p1"), bash("toolu_fixture_4", "echo two"), read("toolu_fixture_5", "a.md")]),
+			claude("toolUse", [think("Both.", "sig-p1"), bash("toolu_fixture_4", "echo two"), read("toolu_fixture_5", "a.md")]),
 			result("toolu_fixture_4", "bash", result4),
 			result("toolu_fixture_5", "read", "alpha\n"),
 			...(steer ? [user(steer)] : []),
 		] : []),
-		claude("stop", [thinking("Done.", "sig-a2"), { type: "text", text: "DONE" }]),
-		...(prompt2 ? prompt2.map((text) => user([{ type: "text", text }])) : [user(PROMPT_2)]),
-		claude("toolUse", [thinking("Sleep.", "sig-a3"), bash("toolu_fixture_3", "sleep 40")]),
+		claude("stop", [think("Done.", "sig-a2"), { type: "text", text: "DONE" }]),
+		...(prompt2 ? prompt2.map((text) => typeof text === "string" ? user([{ type: "text", text }]) : text) : [user(PROMPT_2)]),
+		claude("toolUse", [think("Sleep.", "sig-a3"), bash("toolu_fixture_3", "sleep 40")]),
 		result("toolu_fixture_3", "bash", "Command aborted", true),
 	];
 }
@@ -65,15 +72,18 @@ export function piPriors({ prompt1 = PROMPT_1, result1 = "one\n", signature1 = "
  *  Claude Code's record of a user message sent while those calls ran, a
  *  queued_command attachment, off the main chain beneath the last call
  *  (`under: "call"`) or beneath the first, off-chain result
- *  (`under: "result"`). `tiedResult` parents the off-chain result on the
+ *  (`under: "result"`), or on the chain after the last result, where Claude
+ *  Code writes one it delivered (`under: "chain"`). `tiedResult` parents the off-chain result on the
  *  record before the turn instead, so only its call's id ties it to it.
  *  `thinkingTail` ends every thinking block's text, as Claude often ends one
  *  with "\n\n" that Pi's copy can lack; `signature1` replaces the first
  *  thinking block's signature. `emptyResult1` makes the first tool's output
  *  that text of only whitespace, which Claude Code stores as its note that
- *  the call had no output. `prompt2` replaces the second prompt's text, as
- *  when the bridge joined several of Pi's user messages into it. */
-export function nativeTranscript(sessionId, cwd, { offChainText, parallel = false, steer, tiedResult = false, thinkingTail = "", signature1 = "sig-a1", emptyResult1, prompt2 = PROMPT_2 } = {}) {
+ *  the call had no output; `imageResult1` adds that base64 PNG to its output
+ *  with the note Claude Code writes after an image it received. `prompt2`
+ *  replaces the second prompt's text, as when the bridge joined several of
+ *  Pi's user messages into it. */
+export function nativeTranscript(sessionId, cwd, { offChainText, parallel = false, steer, tiedResult = false, thinkingTail = "", signature1 = "sig-a1", emptyResult1, imageResult1, prompt2 = PROMPT_2 } = {}) {
 	const records = [];
 	let next = 0;
 	let parent = null;
@@ -116,8 +126,13 @@ export function nativeTranscript(sessionId, cwd, { offChainText, parallel = fals
 	}
 	assistant("msg_fixture_a1", think("Run it.", signature1), "tool_use");
 	const a1 = assistant("msg_fixture_a1", { type: "tool_use", id: "toolu_fixture_1", name: "mcp__custom-tools__bash", input: { command: "echo one" }, caller: { type: "direct" } }, "tool_use");
+	const output1 = imageResult1 === undefined ? [{ type: "text", text: "one\n" }] : [
+		{ type: "text", text: "one\n" },
+		{ type: "image", source: { type: "base64", media_type: "image/png", data: imageResult1 } },
+		{ type: "text", text: "[Image: source: /fixture/tool-results/mcp-custom-tools-blob-1.png]" },
+	];
 	toolResult(
-		{ tool_use_id: "toolu_fixture_1", type: "tool_result", content: emptyResult1 === undefined ? [{ type: "text", text: "one\n" }] : "(mcp__custom-tools__bash completed with no output)" },
+		{ tool_use_id: "toolu_fixture_1", type: "tool_result", content: emptyResult1 === undefined ? output1 : "(mcp__custom-tools__bash completed with no output)" },
 		{ toolUseResult: [{ type: "text", text: emptyResult1 ?? "one\n" }], sourceToolAssistantUUID: a1 },
 	);
 	reminder({ type: "total_tokens_reminder", text: "<total_tokens>900 tokens left</total_tokens>" }, "<total_tokens>900 tokens left</total_tokens>");
@@ -129,11 +144,12 @@ export function nativeTranscript(sessionId, cwd, { offChainText, parallel = fals
 		assistant("msg_fixture_p1", think("Both.", "sig-p1"), "tool_use");
 		const p1 = assistant("msg_fixture_p1", { type: "tool_use", id: "toolu_fixture_4", name: "mcp__custom-tools__bash", input: { command: "echo two" }, caller: { type: "direct" } }, "tool_use");
 		const p2 = assistant("msg_fixture_p1", { type: "tool_use", id: "toolu_fixture_5", name: "mcp__custom-tools__read", input: { file_path: "a.md" }, caller: { type: "direct" } }, "tool_use");
-		const queued = (parentUuid) => sibling({
-			parentUuid, type: "attachment", renderedRole: "system",
+		const queuedRecord = steer && {
+			type: "attachment", renderedRole: "system",
 			attachment: { type: "queued_command", prompt: steer.text, source_uuid: "00000000-0000-4000-8000-0000000000aa", commandMode: "prompt", timestamp: base().timestamp },
 			rendered: [{ content: `<system-reminder>\nThe user sent a new message while you were working:\n${steer.text}\n</system-reminder>` }],
-		});
+		};
+		const queued = (parentUuid) => sibling({ parentUuid, ...queuedRecord });
 		if (steer?.under === "call") queued(p2);
 		const offChainResult = sibling({
 			parentUuid: tiedResult ? beforeTurn : p1, type: "user", promptId: "prompt-fixture",
@@ -142,6 +158,7 @@ export function nativeTranscript(sessionId, cwd, { offChainText, parallel = fals
 		});
 		if (steer?.under === "result") queued(offChainResult);
 		toolResult({ tool_use_id: "toolu_fixture_5", type: "tool_result", content: [{ type: "text", text: "alpha\n" }] }, { toolUseResult: [{ type: "text", text: "alpha\n" }], sourceToolAssistantUUID: p2 });
+		if (steer?.under === "chain") chain(queuedRecord);
 		reminder({ type: "total_tokens_reminder", text: "<total_tokens>825 tokens left</total_tokens>" }, "<total_tokens>825 tokens left</total_tokens>");
 	}
 	assistant("msg_fixture_a2", think("Done.", "sig-a2"), "end_turn");

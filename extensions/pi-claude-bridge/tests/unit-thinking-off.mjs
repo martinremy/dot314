@@ -63,6 +63,7 @@ describe("Pi thinking off", () => {
 			"claude-opus-4-8": true,
 			"claude-sonnet-5-5": false,
 			"claude-sonnet-5": true,
+			"claude-haiku-5-5": false,
 		});
 	});
 

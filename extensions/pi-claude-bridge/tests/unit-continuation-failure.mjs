@@ -306,8 +306,10 @@ async function rebuildImport(sessionId, piMessages) {
 		sharedSession: { sessionId: CHILD_SESSION, cursor: piMessages.length, cwd: process.cwd(), needsRebuild: true },
 	}));
 	let resumed;
+	let prompt;
 	__testSetSdkQueryFactory((input) => {
 		resumed = input.options.resume;
+		prompt = input.prompt;
 		return fakeQuery([{ type: "result", subtype: "success", result: "ok" }]);
 	});
 	const stream = streamClaudeAgentSdk(model, { messages: [...piMessages, { role: "user", content: "next prompt", timestamp: Date.now() }] }, { sessionId });
@@ -317,10 +319,11 @@ async function rebuildImport(sessionId, piMessages) {
 	const jsonl = readFileSync(openSession({ sessionId: resumed, projectPath: process.cwd(), claudeDir: root }).jsonlPath, "utf8");
 	const records = jsonl.trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.message).map((entry) => entry.message);
 	// "role:text", tool traffic reduced to markers.
-	return records.map((record) => {
+	const lines = records.map((record) => {
 		const content = typeof record.content === "string" ? [{ type: "text", text: record.content }] : record.content;
 		return `${record.role}:${content.map((block) => block.type === "text" ? block.text : `[${block.type} ${block.id ?? block.tool_use_id}]`).join("|")}`;
 	});
+	return { lines, prompt };
 }
 
 const count = (lines, needle) => lines.filter((line) => line.includes(needle)).length;
@@ -345,7 +348,7 @@ async function assertRepliesKept(sessionId, turn, expectedReplies, { failed = tr
 	const fromDisk = roundTripThroughPiSession(persisted);
 	assert.deepEqual(fromDisk.at(-1).content.map((block) => block.text), expectedReplies, "the replies survive Pi's disk round trip");
 
-	const lines = await rebuildImport(sessionId, fromDisk);
+	const { lines } = await rebuildImport(sessionId, fromDisk);
 	for (const reply of expectedReplies) assert.equal(count(lines, reply), 1, `${reply} imported exactly once:\n${lines.join("\n")}`);
 	assert.equal(count(lines, "PARTIAL-"), 0, "no partial continuation output imported");
 	assert.equal(count(lines, "failed-call"), 0, "no tool call from the failed continuation imported");
@@ -452,8 +455,11 @@ describe("a cancelled continuation ends as aborted, never as a kept reply", () =
 			assert.ok(!integrityEntries.some((entry) => entry.data?.label === "continuation_failed_after_reply"));
 			// Pi's abort semantics: an aborted turn is not history (as with a
 			// cancelled single query), so the rebuild ends at the steer.
-			const lines = await rebuildImport(sessionId, roundTripThroughPiSession(persisted));
-			assert.equal(lines.at(-1), "user:STEER-ONE", lines.join("\n"));
+			// The steer and the cut-off reply after it are the next prompt's,
+			// so the import never ends on the unanswered steer.
+			const { lines, prompt } = await rebuildImport(sessionId, roundTripThroughPiSession(persisted));
+			assert.equal(count(lines, "STEER-ONE"), 0, lines.join("\n"));
+			assert.equal(prompt, "STEER-ONE\n\n[Request interrupted by user]\n\nnext prompt");
 			assert.equal(count(lines, "PARTIAL-"), 0);
 		});
 	}
@@ -594,8 +600,9 @@ describe("cancelling a later Pi run reaches the query it joined", () => {
 			assert.equal(terminal.reason, "aborted");
 			assert.equal(persisted.at(-1).stopReason, "aborted");
 			assert.deepEqual(notifications.filter((entry) => /mid-turn message/.test(entry.message)), [], "no resend warning for a cancellation");
-			const lines = await rebuildImport(sessionId, roundTripThroughPiSession(persisted));
-			assert.equal(lines.at(-1), "user:STEER-ONE", lines.join("\n"));
+			const { lines, prompt } = await rebuildImport(sessionId, roundTripThroughPiSession(persisted));
+			assert.equal(count(lines, "STEER-ONE"), 0, lines.join("\n"));
+			assert.equal(prompt, "STEER-ONE\n\n[Request interrupted by user]\n\nnext prompt");
 			assert.equal(count(lines, "ORIGINAL-REPLY"), 0, "nothing of the cancelled turn is kept");
 			assert.equal(count(lines, "PARTIAL-"), 0);
 		});
