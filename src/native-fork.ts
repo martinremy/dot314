@@ -77,8 +77,8 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 
 const recordMessage = (record: TranscriptRecord): RecordMessage => record.message as RecordMessage;
 
-// A user message Pi sent while the query ran. Claude Code keeps it as this
-// attachment; Pi keeps it as a user message, so the prefix ends before it.
+// A user message Pi sent while the query ran (a steer). Claude Code keeps it
+// as this attachment and renders it as a user message; Pi keeps it as one.
 function isQueuedCommand(record: TranscriptRecord): boolean {
 	return record.type === "attachment" && isObject(record.attachment) && record.attachment.type === "queued_command";
 }
@@ -112,6 +112,8 @@ function normalizeBlocks(content: unknown): unknown[] | undefined {
 			blocks.push({ type: "text", text: block.text });
 		} else if (block.type === "image" && isObject(block.source) && block.source.type === "base64") {
 			blocks.push({ type: "image", source: { type: "base64", media_type: block.source.media_type, data: block.source.data } });
+		} else if (block.type === "image" && block.source === undefined) {
+			blocks.push({ type: "image" });
 		} else {
 			return undefined;
 		}
@@ -139,20 +141,40 @@ function promptForm(messages: PiMessage[]): unknown {
 
 /** A Pi tool result as the MCP handler delivered it to Claude Code
  *  (extract-tool-results.ts toolResultToMcpContent, as index.ts
- *  extractAllToolResults hands it to the handler), with an MCP image in the
- *  form Claude Code stores it. Before it stores a successful result, Claude
- *  Code replaces one with no content, an empty array or only text blocks of
- *  whitespace with "(<tool> completed with no output)", naming the tool as
- *  its call does. A failed result is stored as its error text instead, and a
- *  result with an image is output. */
+ *  extractAllToolResults hands it to the handler), in the form Claude Code
+ *  stores it. Claude Code replaces a successful result with no content, an
+ *  empty array or only text blocks of whitespace with "(<tool> completed
+ *  with no output)", naming the tool as its call does. It stores a failed
+ *  result as one string: the text blocks joined by newlines and trimmed, or
+ *  "Command failed with no output" when that is empty (claude 2.1.296). */
 function deliveredResultForm(message: PiMessage, toolName: string | undefined): unknown {
 	const blocks = toolResultToMcpContent(message.content as Parameters<typeof toolResultToMcpContent>[0]);
 	const failed = (message as { isError?: boolean }).isError === true;
-	if (toolName !== undefined && !failed && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
+	if (failed) return blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim() || "Command failed with no output";
+	if (toolName !== undefined && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
 	return blocks.map((block) =>
 		block.type === "text"
 			? { type: "text", text: block.text }
 			: { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
+}
+
+/** A tool result's content with each image reduced to its place. Claude Code
+ *  stores an MCP image it received re-encoded when large, and follows every
+ *  one with a text block naming the file it saved, which Pi never sees: "[Image:
+ *  source: <path>]", plus the original and displayed size when it scaled it.
+ *  The call id ties the result to Pi's, so the image is the one Pi sent. */
+function imagesByPlace(content: unknown): unknown {
+	const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+	if (!Array.isArray(blocks)) return content;
+	const placed: unknown[] = [];
+	for (const block of blocks) {
+		if (!isObject(block)) return content;
+		const previous = placed.at(-1);
+		if (block.type === "image") placed.push({ type: "image" });
+		else if (isObject(previous) && previous.type === "image" && block.type === "text" && typeof block.text === "string" && block.text.startsWith("[Image: source: ") && block.text.endsWith("]")) continue;
+		else placed.push(block);
+	}
+	return placed;
 }
 
 // A prompt either came from Claude Code's query (the prompt form) or from an
@@ -162,13 +184,14 @@ function promptMatches(record: TranscriptRecord, message: PiMessage): boolean {
 }
 
 // Claude Code stores a successful MCP result as its content blocks and a
-// failed one as its text; sameContent reads a string as one text block.
-// `toolName` is the name of the call the result answers, in Claude Code's
-// transcript.
+// failed one as its text; sameContent reads a string as one text block, and
+// images compare by place. `toolName` is the name of the call the result
+// answers, in Claude Code's transcript.
 function toolResultMatches(block: Record<string, unknown>, message: PiMessage, toolName: string | undefined): boolean {
 	if ((block.is_error === true) !== ((message as { isError?: boolean }).isError === true)) return false;
 	const content = message.content as Parameters<typeof toolResultContentToAnthropic>[0];
-	return sameContent(block.content, [deliveredResultForm(message, toolName), toolResultContentToAnthropic(content) || ""]);
+	const expected = [deliveredResultForm(message, toolName), toolResultContentToAnthropic(content) || ""];
+	return sameContent(imagesByPlace(block.content), expected.map(imagesByPlace));
 }
 
 /** The block the bridge's stream records in Pi for a block of Claude Code's
@@ -202,19 +225,18 @@ function storedPiBlock(block: unknown): unknown {
 }
 
 /**
- * Whether Pi holds Claude Code's signed thinking block without its trailing
- * whitespace. Claude often ends a thinking block with "\n\n", and a Pi
- * extension may trim the text of the message Pi keeps (one that labels
- * thinking for display does, at `message_end`). The signature is the API's
- * identity for the block, so the block is the same one; the fork then
- * carries Claude Code's bytes, which are what Claude saw. Without a
- * signature nothing identifies the block, so it never matches this way.
+ * Whether Pi holds Claude Code's signed thinking block under other text. A Pi
+ * extension may rewrite the thinking text of the message Pi keeps: one that
+ * labels thinking for display trimmed it, and older versions wrapped it in a
+ * colored "Thinking:" label. The signature is the API's identity for the
+ * block, so the block is the same one; the fork then carries Claude Code's
+ * bytes, which are what Claude saw. Without a signature nothing identifies
+ * the block, so it never matches this way.
  */
-function trimmedSignedThinking(native: unknown, stored: unknown): boolean {
+function sameSignedThinking(native: unknown, stored: unknown): boolean {
 	if (!isObject(native) || !isObject(stored) || native.type !== "thinking" || stored.type !== "thinking" || stored.redacted === true) return false;
 	const signature = native.signature;
-	if (typeof signature !== "string" || signature === "" || stored.thinkingSignature !== signature) return false;
-	return typeof native.thinking === "string" && stored.thinking === native.thinking.trimEnd();
+	return typeof signature === "string" && signature !== "" && stored.thinkingSignature === signature;
 }
 
 /** Whether Pi's assistant message is what the bridge's stream recorded for
@@ -226,7 +248,7 @@ function streamedMatches(blocks: unknown[], message: PiMessage, customToolNameTo
 	if (!Array.isArray(content) || content.length !== blocks.length) return false;
 	return blocks.every((block, n) => {
 		const streamed = streamedPiBlock(block, customToolNameToPi);
-		return streamed !== undefined && (isDeepStrictEqual(streamed, storedPiBlock(content[n])) || trimmedSignedThinking(block, content[n]));
+		return streamed !== undefined && (isDeepStrictEqual(streamed, storedPiBlock(content[n])) || sameSignedThinking(block, content[n]));
 	});
 }
 
@@ -264,6 +286,9 @@ interface GroupMatch {
 	 *  group and that were verified against Pi's results, each as
 	 *  `<uuid of the chain record it follows>\n<uuid>`. */
 	stitched: string[];
+	/** The queued_command records on the chain after this group that matched
+	 *  Pi's user messages. */
+	steers: string[];
 }
 
 function readTranscript(path: string): { records: TranscriptRecord[] } | { reason: string } {
@@ -345,17 +370,53 @@ export function planNativePrefix(
 	const transcript = forkSlice(read.records);
 	const stitched = stitchedRecords(transcript, chain);
 
+	// The import replaces the trailing turns it cannot replay with a note,
+	// and only for the messages it imports. An earlier rebuild may have
+	// imported such a turn with its thinking dropped while a later reply
+	// followed it, so the prefix ends before the first of them.
+	const unreplayable = unreplayableTrailingTurns(priors);
+	const limit = unreplayable.size > 0 ? Math.min(...unreplayable) : priors.length;
+
+	// A steer on the chain: the run of Pi's next user messages it renders as.
+	// The bridge sends every user message Pi injected while the query ran as
+	// one prompt (index.ts planDeferredUserReplay). The index after the run,
+	// or undefined when no run matches.
+	const steerRun = (record: TranscriptRecord, next: number): number | undefined => {
+		const prompt = isObject(record.attachment) ? record.attachment.prompt : undefined;
+		const run: PiMessage[] = [];
+		for (let index = next; index < limit; index++) {
+			const message = priors[index];
+			if (message.role === "system") continue;
+			if (message.role !== "user") break;
+			run.push(message);
+			if (sameContent(prompt, [promptForm(run)])) return index + 1;
+		}
+		return undefined;
+	};
+
 	// Claude Code's records that follow a group: attachments, meta and system
-	// records. The prefix keeps them up to a queued_command, never cutting on
-	// a progress record (forkSession does not copy those).
+	// records, and the steers that match Pi's user messages. The prefix keeps
+	// them up to a queued_command that matches none, never cutting on a
+	// progress record (forkSession does not copy those).
 	const trailing = (from: number, last: number, next: number, verified: string[] = []): GroupMatch => {
 		let end = from;
 		let cut = last;
-		while (end < chain.length && isTrailingCarry(chain[end])) {
-			if (chain[end].type !== "progress") cut = end;
+		const steers: string[] = [];
+		while (end < chain.length) {
+			const record = chain[end];
+			if (isTrailingCarry(record)) {
+				if (record.type !== "progress") cut = end;
+				end++;
+				continue;
+			}
+			const after = isQueuedCommand(record) ? steerRun(record, next) : undefined;
+			if (after === undefined) break;
+			steers.push(record.uuid!);
+			next = after;
+			cut = end;
 			end++;
 		}
-		return { next, last: cut, end, stop: end < chain.length && isQueuedCommand(chain[end]), stitched: verified };
+		return { next, last: cut, end, stop: end < chain.length && isQueuedCommand(chain[end]), stitched: verified, steers };
 	};
 
 	const matchPrompt = (at: number, index: number): GroupMatch | undefined => {
@@ -460,12 +521,6 @@ export function planNativePrefix(
 	let index = 0;
 	// Every matched group's end, in order: where the prefix may be cut.
 	const ends: PrefixEnd[] = [];
-	// The import replaces the trailing turns it cannot replay with a note,
-	// and only for the messages it imports. An earlier rebuild may have
-	// imported such a turn with its thinking dropped while a later reply
-	// followed it, so the prefix ends before the first of them.
-	const unreplayable = unreplayableTrailingTurns(priors);
-	const limit = unreplayable.size > 0 ? Math.min(...unreplayable) : priors.length;
 	while (index < limit) {
 		const message = priors[index];
 		if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
@@ -489,7 +544,7 @@ export function planNativePrefix(
 		}
 		if (!group) break;
 		index = group.next;
-		ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched });
+		ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched, steers: group.steers });
 		position = group.end;
 		if (group.stop) break;
 	}
@@ -524,7 +579,7 @@ export function planNativePrefix(
 	};
 }
 
-type PrefixEnd = { piCount: number; cut: number; stitched: string[] };
+type PrefixEnd = { piCount: number; cut: number; stitched: string[]; steers: string[] };
 
 /**
  * The last of `ends` whose fork carries exactly the verified records.
@@ -544,8 +599,9 @@ type PrefixEnd = { piCount: number; cut: number; stitched: string[] };
  * binary, which `a_e` lacks). Those are Claude Code's own and Pi has no
  * counterpart, except a queued_command: Pi's steer, rendered as a user
  * message, which Pi holds as one and the import would write again. So the
- * slice through the cut holds no queued_command, on the chain or off it.
- * `steered` says whether that ruled out a later cut.
+ * slice through the cut holds no queued_command but the ones on the chain
+ * that the groups through it matched to Pi's user messages. `steered` says
+ * whether that ruled out a later cut.
  */
 function lastCarriedExactly(transcript: TranscriptRecord[], chain: TranscriptRecord[], ends: PrefixEnd[]): { end?: PrefixEnd; steered: boolean } {
 	const isMessage = (record: TranscriptRecord): boolean => record.type === "user" || record.type === "assistant";
@@ -565,11 +621,12 @@ function lastCarriedExactly(transcript: TranscriptRecord[], chain: TranscriptRec
 	const verifiedThrough: number[] = [];
 	let verified = 0;
 	for (const end of ends) verifiedThrough.push(verified += end.stitched.length);
-	const steer = transcript.findIndex(isQueuedCommand);
 	let steered = false;
 	for (let n = ends.length - 1; n >= 0; n--) {
 		const { cut } = ends[n];
 		const at = position.get(chain[cut].uuid!)!;
+		const matched = new Set(ends.slice(0, n + 1).flatMap((end) => end.steers));
+		const steer = transcript.findIndex((record) => isQueuedCommand(record) && !matched.has(record.uuid!));
 		if (steer !== -1 && at >= steer) {
 			steered = true;
 			continue;

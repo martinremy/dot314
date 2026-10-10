@@ -146,17 +146,22 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.equal(chain[kept.length + 1].message.content[0].content, "uno\n", "the differing result is Pi's");
 	});
 
-	it("forks past signed thinking whose trailing whitespace Pi's copy lacks, and carries Claude Code's text", async () => {
-		const old = writeOldTranscript(claudeDir, { thinkingTail: "\n\n" });
-		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
+	for (const [what, native, pi] of [
+		["whose trailing whitespace Pi's copy lacks", { thinkingTail: "\n\n" }, {}],
+		["that Pi's copy holds inside a display label", {}, { labelThinking: true }],
+	]) {
+		it(`forks past signed thinking ${what}, and carries Claude Code's text`, async () => {
+			const old = writeOldTranscript(claudeDir, native);
+			setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
 
-		const result = await syncSharedSession([...piPriors(), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
+			const result = await syncSharedSession([...piPriors(pi), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
 
-		assert.equal(result.sync.forked, 7, "each thinking block's signature names the one Pi holds");
-		const chain = mainChain(sessionRecords(result.sessionId));
-		const kept = nativeThrough(old.records, old.coveredEnd);
-		assert.deepEqual(chain.slice(0, kept.length).map(rendered), kept.map(rendered), "the prefix is Claude Code's records, its thinking whitespace included");
-	});
+			assert.equal(result.sync.forked, 7, "each thinking block's signature names the one Pi holds");
+			const chain = mainChain(sessionRecords(result.sessionId));
+			const kept = nativeThrough(old.records, old.coveredEnd);
+			assert.deepEqual(chain.slice(0, kept.length).map(rendered), kept.map(rendered), "the prefix is Claude Code's records, its thinking text included");
+		});
+	}
 
 	for (const [what, nativeSignature, piSignature] of [["another signature", "sig-a1", "sig-other"], ["no signature", "", ""]]) {
 		it(`ends the prefix before thinking that differs from Pi's only in trailing whitespace but has ${what}`, async () => {
@@ -189,6 +194,23 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 
 		assert.equal(result.sync.forked, 1, "only the first prompt is Claude Code's own");
 	});
+
+	for (const [what, native, pi] of [
+		["a failed result Claude Code stored trimmed", {}, { failure2: "  File not found: notes.md\n" }],
+		["an image Claude Code stored re-encoded, with its note", { imageResult1: "aW1hZ2UgYXMgQ2xhdWRlIENvZGUgc3RvcmVkIGl0" }, { image1: "aW1hZ2UgYXMgUGkgc2VudCBpdA==" }],
+	]) {
+		it(`forks past ${what}`, async () => {
+			const old = writeOldTranscript(claudeDir, native);
+			setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
+
+			const result = await syncSharedSession([...piPriors(pi), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
+
+			assert.equal(result.sync.forked, 7, "the result is what Claude Code made of Pi's");
+			const chain = mainChain(sessionRecords(result.sessionId));
+			const kept = nativeThrough(old.records, old.coveredEnd);
+			assert.deepEqual(chain.slice(0, kept.length).map(rendered), kept.map(rendered), "the prefix carries Claude Code's form of it");
+		});
+	}
 
 	it("forks past a prompt the bridge joined from two of Pi's messages in a row", async () => {
 		const old = writeOldTranscript(claudeDir, { prompt2: `${NOTICE_1}\n\n${NOTICE_2}` });
@@ -325,6 +347,33 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 			assert.ok(chain[batch - 1].forkedFrom, "the record before it is Claude Code's own");
 		});
 	}
+
+	it("forks past a turn whose steer Claude Code delivered on the main chain, carrying it once as Claude Code's record", async () => {
+		const steer = "steer sent while both calls ran";
+		const old = writeOldTranscript(claudeDir, { parallel: true, steer: { text: steer, under: "chain" } });
+		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
+
+		const result = await syncSharedSession([...piPriors({ parallel: true, steer }), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
+
+		assert.equal(result.sync.forked, 11, "the queued_command is the user message Pi holds after the batch");
+		const records = sessionRecords(result.sessionId);
+		const withSteer = records.filter((record) => JSON.stringify(record).includes(steer));
+		assert.deepEqual(withSteer.map((record) => record.attachment?.type), ["queued_command"], "the steer is in the file once, as Claude Code's record");
+		const kept = nativeThrough(old.records, old.coveredEnd);
+		assert.deepEqual(mainChain(records).slice(0, kept.length).map(rendered), kept.map(rendered));
+	});
+
+	it("ends the prefix before a steer on the main chain that matches none of Pi's user messages", async () => {
+		const steer = "steer Pi does not hold";
+		writeOldTranscript(claudeDir, { parallel: true, steer: { text: steer, under: "chain" } });
+		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true });
+
+		const result = await syncSharedSession([...piPriors({ parallel: true }), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES });
+
+		assert.equal(result.sync.forked, 8, "the prefix ends after the batch, before the steer");
+		const records = sessionRecords(result.sessionId);
+		assert.ok(!JSON.stringify(records).includes(steer), "the unmatched steer is not carried");
+	});
 
 	it("leaves a reply with cut-off thinking to the import's note once /tree makes it the latest", async () => {
 		const claude = (content) => ({ role: "assistant", provider: "pi-claude", api: "anthropic", model: MODEL_ID, stopReason: "stop", content, timestamp: 0 });

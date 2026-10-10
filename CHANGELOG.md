@@ -11,6 +11,9 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ### Fixed
 
+- **The first turn after Esc reads the prompt cache again.**
+  - **Before:** after an Esc the bridge copies Claude Code's own transcript into a new session, but it stopped copying at the first record it couldn't match to Pi's history. That happened at any message sent while Claude was working (a subagent notice, or something typed mid-turn), at any tool result with an image, at a failed tool's output that began or ended with whitespace, and at thinking an older Pi display extension had relabelled. Everything after that point was rewritten from Pi's copy, and the next request re-sent the whole conversation uncached. On Oct 9–10 that cost 200k–450k uncached tokens per Esc in long sessions.
+  - **Now:** each of those matches the way Claude Code stored it: a queued message against Pi's user message, an image by its place (Claude Code re-encodes it and adds a note naming the saved file), a failed result trimmed as Claude Code trims it, and thinking by its signature. Replayed on the 13 rebuilds from those two days, 12 copy all but the aborted turn, and a live probe reads the full cache on the turn after Esc.
 - **Ending a session no longer leaves a Claude Code process waiting forever.**
   - **Before:** a tool batch whose every result says `terminate` (pi-subagents' `structured_output`, for example) ends Pi's run while Claude Code still waits for those results. If the session then ended (`/new`, `/resume`, `/reload`, or a foreground subagent closing), Pi had no run to cancel and the bridge dropped the query without closing it, so its Claude Code process kept running until Pi exited. An RPC reload during a reply did the same once that reply asked for a tool.
   - **Now:** when a session ends, the bridge closes each of its queries that is waiting on Pi. A reply that is still streaming finishes, and its query closes if the reply ends at a tool call.
