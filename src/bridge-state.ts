@@ -152,9 +152,9 @@ function startedLaneStore(): WeakMap<object, string> {
 	return store;
 }
 
-export function recordStartedLane(sessionManager: object, sessionId: string): void {
+export function recordStartedLane(sessionManager: object, sessionId: string, cwd: string): void {
 	startedLaneStore().set(sessionManager, sessionId);
-	notePiSessionStarted(sessionId);
+	notePiSessionStarted(sessionId, cwd);
 }
 
 /** The lane recorded at this manager's session_start, removed as it is read —

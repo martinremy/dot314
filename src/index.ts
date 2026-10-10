@@ -59,6 +59,7 @@ import { buildClaudeQueryOptions } from "./query-options.ts";
 import { sdkQuery as startSdkQuery } from "./sdk-query.ts";
 import { UserMessageLedger, type ClassifyOptions } from "./user-message-ledger.ts";
 import { currentRequestLaneId, runInRequestLane } from "./request-lane.ts";
+import { piSessionCwd } from "./pi-sessions.ts";
 import { attachRequestTiming, startRequestTiming, type RequestTiming } from "./request-timing.ts";
 
 // Re-exports: the module decomposition must not change the entry's public
@@ -620,7 +621,7 @@ export function onPiHistoryReplaced(event: "session_compact" | "session_tree"): 
 	const restarts = running && !queryCtx.detachedFromSharedSession;
 	if (running) {
 		if (restarts) queryCtx.piHistoryReplaced = true;
-		reportToolResultMismatch(queryCtx, event, process.cwd(), { expectedInterruption: restarts });
+		reportToolResultMismatch(queryCtx, event, piSessionCwd(currentRequestLaneId()), { expectedInterruption: restarts });
 	} else if (queryCtx.undeliveredFailure) {
 		// The tool-result callback it was held for answers a history Pi has
 		// just replaced; the conversation's next request starts afresh.
@@ -767,7 +768,7 @@ function streamRequestInLane(
 ): AssistantMessageEventStream {
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
-	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? piSessionCwd(options?.sessionId);
 	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}`);
 
 	// --- Tool result delivery ---
@@ -2004,7 +2005,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => {
-		recordStartedLane(ctx.sessionManager, ctx.sessionManager.getSessionId());
+		recordStartedLane(ctx.sessionManager, ctx.sessionManager.getSessionId(), ctx.cwd);
 		recordProjectTrust(ctx);
 		setPiUI(ctx.ui);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {

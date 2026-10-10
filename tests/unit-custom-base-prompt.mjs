@@ -53,7 +53,7 @@ const CONFIGS = {
 // The owner's main session, started the way session_start records it.
 const mainManager = {};
 const MAIN_ID = "019a0000-0000-7000-8000-00000000c0de";
-before(() => recordStartedLane(mainManager, MAIN_ID));
+before(() => recordStartedLane(mainManager, MAIN_ID, process.cwd()));
 after(() => takeStartedLane(mainManager));
 
 // The request origin, built from the replayed sections the way index.ts builds it.

@@ -2,6 +2,14 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-10
+
+### Fixed
+
+- **A foreground subagent in a worktree is told its own working directory.**
+  - **Before:** Pi does not tell a provider which directory a request belongs to, so the bridge started Claude Code in the Pi process's directory. pi-subagents runs a foreground child (`async: false`) inside the parent's process, so a child working in a worktree or another `cwd` had its Claude Code started in the parent's checkout. Claude Code's first prompt then told the model "Primary working directory" was the parent's checkout while Pi's prompt named the worktree. The bridge also saved that directory with the session, so reopening the child rebuilt Claude's session from scratch.
+  - **Now:** the bridge records each Pi session's directory when the session starts and starts that session's Claude Code there. It also reads that directory's `.pi/claude-bridge.json`, so a child in a trusted worktree uses the worktree's project settings rather than the parent checkout's. Pi itself and async subagents, which run in their own directory, see no change.
+
 ## 2026-10-09
 
 ### Fixed

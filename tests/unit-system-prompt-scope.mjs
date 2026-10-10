@@ -63,7 +63,7 @@ function expectedMain(prompt, config, options, extra) {
 // records it. Pi's main agent sends this id on every request (sdk.ts).
 const mainManager = {};
 const MAIN_ID = "019a0000-0000-7000-8000-000000000001";
-before(() => recordStartedLane(mainManager, MAIN_ID));
+before(() => recordStartedLane(mainManager, MAIN_ID, process.cwd()));
 after(() => takeStartedLane(mainManager));
 
 // What index.ts passes for a request's messages and stream options.
@@ -280,17 +280,17 @@ describe("systemPrompt replacement scope", () => {
 		const messages = await forcedMessages({ customPrompt: SYSTEM_MD }, "Extra.");
 		const source = (sessionId) => sent(messages, CONFIGS.preserve, { sessionId }).source;
 		const first = {};
-		recordStartedLane(first, "first-session");
+		recordStartedLane(first, "first-session", process.cwd());
 		assert.equal(source("first-session"), "pi-main:session");
 		// /new and /resume: the old runtime shuts down, then the new one starts.
 		assert.equal(takeStartedLane(first), "first-session");
 		assert.equal(source("first-session"), "caller");
 		const second = {};
-		recordStartedLane(second, "second-session");
+		recordStartedLane(second, "second-session", process.cwd());
 		assert.equal(source("second-session"), "pi-main:session");
 		// `pi --no-session` fork: the same manager takes the fork's id.
 		assert.equal(takeStartedLane(second), "second-session");
-		recordStartedLane(second, "forked-session");
+		recordStartedLane(second, "forked-session", process.cwd());
 		assert.equal(source("second-session"), "caller");
 		assert.equal(source("forked-session"), "pi-main:session");
 		takeStartedLane(second);
