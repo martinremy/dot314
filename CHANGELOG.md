@@ -4,6 +4,11 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ## 2026-10-10
 
+### Added
+
+- **Claude Haiku 5.5** (`pi-claude/claude-haiku-5-5`) is now in Pi's model menu, above Haiku 4.5.
+  - Claude Code serves it and Pi 1.1.0 lists it, but the bridge only offers models on its own list, so it was missing. Older Pi versions without it get the bridge's own metadata: 1M context, 128K output, text and images, xhigh and max effort, and no off or minimal thinking.
+
 ### Fixed
 
 - **A foreground subagent in a worktree is told its own working directory.**
