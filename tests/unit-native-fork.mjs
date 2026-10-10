@@ -253,6 +253,18 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.equal(result.sync.forked, 10, "Claude Code's one prompt record covers the run, the system message included");
 	});
 
+	it("forks past a prompt that carried a system message's note, in a session that holds notes", async () => {
+		const system = { role: "system", content: "", sections: { rules: "<rules>Changed.</rules>" }, timestamp: 0 };
+		const note = "<system-reminder>\nThe rules changed.\n</system-reminder>";
+		writeOldTranscript(claudeDir, { prompt2: `${note}\n\nRun sleep 40.` });
+		setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "abort", forceRotate: true, systemNotes: true });
+
+		const result = await syncSharedSession([...piPriors({ prompt2: [system, "Run sleep 40."] }), user("next")], cwd, TOOL_NAMES, MODEL_ID, undefined, { customToolNameToPi: PI_TOOL_NAMES, systemNotes: new Map([[system, note]]) });
+
+		assert.equal(result.sync.forked, 8, "Claude Code's prompt record covers the system message and the prompt");
+		assert.equal(getSharedSession().systemNotes, true, "the fork still holds notes");
+	});
+
 	for (const [what, priors] of [
 		["in another order", piPriors({ prompt2: [NOTICE_2, NOTICE_1] })],
 		["without one of them", piPriors({ prompt2: [NOTICE_1] })],

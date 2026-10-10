@@ -7,6 +7,7 @@ import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/res
 import type { Context } from "@earendil-works/pi-ai";
 import { isSkippedAssistant, lastConversationIndex, messageContentToText } from "./convert.ts";
 import { debug } from "./debug.ts";
+import type { SystemNotes } from "./system-notes.ts";
 
 /** Claude Code's own record of an Esc that cut off a reply. */
 export const INTERRUPTED_MARKER = "[Request interrupted by user]";
@@ -19,7 +20,7 @@ export const INTERRUPTED_MARKER = "[Request interrupted by user]";
  *  message with a synthetic "No response requested." reply, which Claude
  *  reads as its own. In the prompt, a cut-off reply reads as Claude Code's
  *  own record of the Esc. System messages among or after them belong to the
- *  run but add nothing to the prompt (convert.ts lastConversationIndex). */
+ *  run and add their note, if any (system-notes.ts). */
 export function promptRunStart(messages: Context["messages"]): number {
 	let start = lastConversationIndex(messages);
 	if (messages[start]?.role !== "user") return start;
@@ -29,14 +30,19 @@ export function promptRunStart(messages: Context["messages"]): number {
 
 /** The content each message of a prompt run contributes, in order: a user
  *  message's own, INTERRUPTED_MARKER for a reply cut off by Esc, nothing for
- *  a failed one. Null when the run holds no user message or anything that
- *  belongs in history. */
-function promptParts(run: Context["messages"]): Array<string | Extract<Context["messages"][number], { role: "user" }>["content"]> | null {
+ *  a failed one, and a system message its note in `notes`. Null when the run
+ *  holds no user message or anything that belongs in history. */
+function promptParts(run: Context["messages"], notes?: SystemNotes): Array<string | Extract<Context["messages"][number], { role: "user" }>["content"]> | null {
 	const messages = run.filter((message) => message.role !== "system");
 	if (!messages.some((message) => message.role === "user")) return null;
 	if (messages.some((message) => message.role !== "user" && !isSkippedAssistant(message))) return null;
-	return messages.flatMap((message) =>
-		message.role === "user" ? [message.content] : message.role === "assistant" && message.stopReason === "aborted" ? [INTERRUPTED_MARKER] : []);
+	return run.flatMap((message) => {
+		if (message.role === "system") {
+			const note = notes?.get(message);
+			return note ? [note] : [];
+		}
+		return message.role === "user" ? [message.content] : message.role === "assistant" && message.stopReason === "aborted" ? [INTERRUPTED_MARKER] : [];
+	});
 }
 
 /** Whether Claude Code would read `content` as one of its own slash commands:
@@ -62,8 +68,8 @@ export function slashLed(content: string | ContentBlockParam[]): boolean {
  *  rebuild that forks Claude Code's own transcript (native-fork.ts) keeps
  *  the merged record when it equals this join of Pi's whole run of user
  *  messages, and imports Pi's messages after it as separate records. */
-export function extractUserPrompt(messages: Context["messages"]): string | null {
-	const parts = promptParts(messages);
+export function extractUserPrompt(messages: Context["messages"], notes?: SystemNotes): string | null {
+	const parts = promptParts(messages, notes);
 	if (!parts) return null;
 	return parts.map((content) => typeof content === "string" ? content : messageContentToText(content) || "").join("\n\n");
 }
@@ -71,8 +77,8 @@ export function extractUserPrompt(messages: Context["messages"]): string | null 
 /** Combine consecutive user messages as ContentBlockParam[] while preserving images.
  *  Returns null if no images — caller should fall back to the string prompt.
  *  Same N-into-1 merge as extractUserPrompt (see its comment for why). */
-export function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockParam[] | null {
-	const parts = promptParts(messages);
+export function extractUserPromptBlocks(messages: Context["messages"], notes?: SystemNotes): ContentBlockParam[] | null {
+	const parts = promptParts(messages, notes);
 	if (!parts) return null;
 
 	let hasImage = false;
