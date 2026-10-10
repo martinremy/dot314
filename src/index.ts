@@ -18,7 +18,7 @@ import { extractUserPrompt, extractUserPromptBlocks, slashLed } from "./user-pro
 import { buildModels, modelDisplayName } from "./models.ts";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.ts";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.ts";
-import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCalls, idleForHostResume, isForkLane, laneInUse, peekCtx, releaseForkLane, requestLaneFor, strandedToolCallResult, summarizeDroppedUserMessages, takeQueuedOrParkedResult, toolCallDrainCause, type ClaimedToolCall, type DeferredUserMessage, type QueryRestartRequest, type ToolUseIdClaim } from "./query-state.ts";
+import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCalls, idleForHostResume, isForkLane, laneInUse, peekCtx, releaseForkLane, requestLaneFor, sessionQueryContexts, strandedToolCallResult, summarizeDroppedUserMessages, takeQueuedOrParkedResult, toolCallDrainCause, type ClaimedToolCall, type DeferredUserMessage, type QueryRestartRequest, type ToolUseIdClaim } from "./query-state.ts";
 import { answersKnownCall, deliverSteerBeforeResults, resolveToolResults } from "./tool-result-delivery.ts";
 import { abortSdkQuery, closeSdkQuery, teardownQuery } from "./query-teardown.ts";
 import { loadConfig, recordProjectTrust } from "./config.ts";
@@ -2047,6 +2047,17 @@ export default function (pi: ExtensionAPI) {
 			// would have carried it to the marker is cancelled just below.
 			if (event.reason === "reload" && (laneInUse(sessionId) || getSharedSession()?.forceRotate === true)) {
 				noteReloadWithLiveWriter(ctx.sessionManager);
+			}
+			// Pi cancels a running turn before the session ends, but a query can
+			// outlive its run: a tool batch whose every result says terminate
+			// ends the run while Claude Code still waits for those results. No
+			// callback can reach it once its lane is gone, so its child would wait
+			// until Pi exits. A query still streaming to Pi (an RPC reload does
+			// not wait for the reply) is left to finish it.
+			for (const queryCtx of sessionQueryContexts(sessionId)) {
+				if (!queryCtx.activeQuery || queryCtx.currentPiStream) continue;
+				debug(`session_shutdown: closing a Claude Code query still in session ${sessionId.slice(0, 8)}`);
+				queryCtx.onRequestAbort?.();
 			}
 			cancelScheduledSessionPersistence(ctx.sessionManager);
 			clearSession("session_shutdown");

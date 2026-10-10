@@ -1267,6 +1267,14 @@ export function releaseForkLane(laneId: string): void {
 	forkLaneStore().delete(laneId);
 }
 
+/** The query contexts of Pi session `sessionId`: its own lane's and each of
+ *  its fork lanes'. */
+export function sessionQueryContexts(sessionId: string): QueryContext[] {
+	const contexts = [peekQueryContext(sessionId)];
+	for (const [forkId, fork] of forkLaneStore()) if (fork.base === sessionId) contexts.push(peekQueryContext(forkId));
+	return contexts.filter((queryCtx) => queryCtx !== undefined);
+}
+
 /** Whether lane `laneId` is still in use: a query in it is running (the
  *  original one, or a restart or account retry that replaced it), a fresh
  *  request waits for its forked rebuild before starting one
