@@ -112,8 +112,6 @@ function normalizeBlocks(content: unknown): unknown[] | undefined {
 			blocks.push({ type: "text", text: block.text });
 		} else if (block.type === "image" && isObject(block.source) && block.source.type === "base64") {
 			blocks.push({ type: "image", source: { type: "base64", media_type: block.source.media_type, data: block.source.data } });
-		} else if (block.type === "image" && block.source === undefined) {
-			blocks.push({ type: "image" });
 		} else {
 			return undefined;
 		}
@@ -158,11 +156,7 @@ function deliveredResultForm(message: PiMessage, toolName: string | undefined): 
 			: { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
 }
 
-/** A tool result's content with each image reduced to its place. Claude Code
- *  stores an MCP image it received re-encoded when large, and follows every
- *  one with a text block naming the file it saved, which Pi never sees: "[Image:
- *  source: <path>]", plus the original and displayed size when it scaled it.
- *  The call id ties the result to Pi's, so the image is the one Pi sent. */
+/** Removes Claude Code's added image-file notes while retaining image bytes and media type. */
 function imagesByPlace(content: unknown): unknown {
 	const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
 	if (!Array.isArray(blocks)) return content;
@@ -170,7 +164,7 @@ function imagesByPlace(content: unknown): unknown {
 	for (const block of blocks) {
 		if (!isObject(block)) return content;
 		const previous = placed.at(-1);
-		if (block.type === "image") placed.push({ type: "image" });
+		if (block.type === "image") placed.push(block);
 		else if (isObject(previous) && previous.type === "image" && block.type === "text" && typeof block.text === "string" && block.text.startsWith("[Image: source: ") && block.text.endsWith("]")) continue;
 		else placed.push(block);
 	}
@@ -185,7 +179,7 @@ function promptMatches(record: TranscriptRecord, message: PiMessage): boolean {
 
 // Claude Code stores a successful MCP result as its content blocks and a
 // failed one as its text; sameContent reads a string as one text block, and
-// images compare by place. `toolName` is the name of the call the result
+// images compare by content. `toolName` is the name of the call the result
 // answers, in Claude Code's transcript.
 function toolResultMatches(block: Record<string, unknown>, message: PiMessage, toolName: string | undefined): boolean {
 	if ((block.is_error === true) !== ((message as { isError?: boolean }).isError === true)) return false;

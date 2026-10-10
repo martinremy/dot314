@@ -146,6 +146,28 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 		assert.equal(chain[kept.length + 1].message.content[0].content, "uno\n", "the differing result is Pi's");
 	});
 
+	for (const [name, data, mimeType] of [
+		["image bytes", "aW1hZ2UtQg==", "image/png"],
+		["image media type", "aW1hZ2UtQQ==", "image/jpeg"],
+	]) {
+		it(`imports Pi's replacement when the same tool result has changed ${name}`, async () => {
+			await syncSharedSession([...piPriors({ image1: "aW1hZ2UtQQ==" }), user("next")], cwd, TOOL_NAMES, MODEL_ID);
+			setSharedSession({ ...getSharedSession(), needsRebuild: true, rebuildReason: "history-rewritten" });
+			const updated = piPriors({ image1: data });
+			const result = updated.find(message => message.role === "toolResult" && message.toolCallId === "toolu_fixture_1");
+			result.content.find(block => block.type === "image").mimeType = mimeType;
+
+			const rebuilt = await syncSharedSession([...updated, user("next")], cwd, TOOL_NAMES, MODEL_ID);
+
+			const delivered = sessionRecords(rebuilt.sessionId)
+				.flatMap(record => record.message?.content ?? [])
+				.find(block => block.type === "tool_result" && block.tool_use_id === "toolu_fixture_1");
+			assert.deepEqual(delivered.content.filter(block => block.type === "image"), [
+				{ type: "image", source: { type: "base64", media_type: mimeType, data } },
+			], "the rebuilt transcript must contain Pi's replacement image");
+		});
+	}
+
 	for (const [what, native, pi] of [
 		["whose trailing whitespace Pi's copy lacks", { thinkingTail: "\n\n" }, {}],
 		["that Pi's copy holds inside a display label", {}, { labelThinking: true }],
@@ -197,7 +219,7 @@ describe("a same-account rebuild forks Claude Code's transcript", () => {
 
 	for (const [what, native, pi] of [
 		["a failed result Claude Code stored trimmed", {}, { failure2: "  File not found: notes.md\n" }],
-		["an image Claude Code stored re-encoded, with its note", { imageResult1: "aW1hZ2UgYXMgQ2xhdWRlIENvZGUgc3RvcmVkIGl0" }, { image1: "aW1hZ2UgYXMgUGkgc2VudCBpdA==" }],
+		["an unchanged image with Claude Code's source note", { imageResult1: "aW1hZ2UtQQ==" }, { image1: "aW1hZ2UtQQ==" }],
 	]) {
 		it(`forks past ${what}`, async () => {
 			const old = writeOldTranscript(claudeDir, native);

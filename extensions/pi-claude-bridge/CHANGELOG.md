@@ -11,6 +11,7 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ### Fixed
 
+- Rebuilds compare image data and media type before copying old tool results. If Pi replaces an image, its current image is imported; Claude Code's added source-note text is ignored.
 - System instructions changed during a tool call reach Claude with the next query. The bridge sends Pi's current system prompt instead of freezing the initial prompt and relying on conversation notes. Changing instructions can invalidate Claude's prompt cache.
 - **The first turn after Esc reads the prompt cache again.**
   - **Before:** after an Esc the bridge copies Claude Code's own transcript into a new session, but it stopped copying at the first record it couldn't match to Pi's history. That happened at any message sent while Claude was working (a subagent notice, or something typed mid-turn), at any tool result with an image, at a failed tool's output that began or ended with whitespace, and at thinking an older Pi display extension had relabelled. Everything after that point was rewritten from Pi's copy, and the next request re-sent the whole conversation uncached. On Oct 9–10 that cost 200k–450k uncached tokens per Esc in long sessions.

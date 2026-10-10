@@ -48032,8 +48032,6 @@ function normalizeBlocks(content) {
       blocks.push({ type: "text", text: block.text });
     } else if (block.type === "image" && isObject3(block.source) && block.source.type === "base64") {
       blocks.push({ type: "image", source: { type: "base64", media_type: block.source.media_type, data: block.source.data } });
-    } else if (block.type === "image" && block.source === void 0) {
-      blocks.push({ type: "image" });
     } else {
       return void 0;
     }
@@ -48066,7 +48064,7 @@ function imagesByPlace(content) {
   for (const block of blocks) {
     if (!isObject3(block)) return content;
     const previous = placed.at(-1);
-    if (block.type === "image") placed.push({ type: "image" });
+    if (block.type === "image") placed.push(block);
     else if (isObject3(previous) && previous.type === "image" && block.type === "text" && typeof block.text === "string" && block.text.startsWith("[Image: source: ") && block.text.endsWith("]")) continue;
     else placed.push(block);
   }
