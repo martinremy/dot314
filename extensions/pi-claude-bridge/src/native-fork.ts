@@ -26,7 +26,6 @@ import { isChildExecutedTool } from "./connectors.ts";
 import { PROVIDER_ID, convertPiMessages, isSkippedAssistant, sanitizeToolId, toolResultContentToAnthropic, unreplayableTrailingTurns, userMessageToAnthropic } from "./convert.ts";
 import { debug } from "./debug.ts";
 import { toolResultToMcpContent } from "./extract-tool-results.ts";
-import type { SystemNotes } from "./system-notes.ts";
 import { isPiDispatchable, mapToolArgs, mapToolName } from "./tool-mapping.ts";
 import { extractUserPrompt, extractUserPromptBlocks } from "./user-prompt.ts";
 
@@ -132,13 +131,12 @@ function sameContent(native: unknown, candidates: unknown[]): boolean {
 }
 
 /** Pi user messages as the bridge sends them as one query's prompt
- *  (user-prompt.ts, as index.ts startFreshQuery calls it), with the notes
- *  for the system messages among them when it sent those. */
-function promptForm(messages: PiMessage[], notes?: SystemNotes): unknown {
+ *  (user-prompt.ts, as index.ts startFreshQuery calls it). */
+function promptForm(messages: PiMessage[]): unknown {
 	const blocks = messages.some((message) => Array.isArray(message.content) && (message.content as unknown[]).some((block) => isObject(block) && block.type === "image"))
-		? extractUserPromptBlocks(messages, notes)
+		? extractUserPromptBlocks(messages)
 		: null;
-	return blocks ?? extractUserPrompt(messages, notes);
+	return blocks ?? extractUserPrompt(messages);
 }
 
 /** A Pi tool result as the MCP handler delivered it to Claude Code
@@ -361,7 +359,6 @@ export function planNativePrefix(
 	claudeDir: string | undefined,
 	customToolNameToSdk?: Map<string, string>,
 	customToolNameToPi?: Map<string, string>,
-	notes?: SystemNotes,
 ): NativePrefixPlan {
 	const read = readTranscript(getSessionPath(oldSessionId, cwd, claudeDir));
 	if ("reason" in read) return { reason: read.reason };
@@ -432,23 +429,13 @@ export function planNativePrefix(
 		// messages in a row (session-persistence.ts planIncrementalPromptBatch),
 		// or ones with a failed or cut-off reply among them (user-prompt.ts
 		// promptRunStart). The run reaches the end of that request's context,
-		// so it is the whole run, and Pi's next message is the reply. A system
-		// message inside the run adds its note to a prompt sent with notes.
+		// so it is the whole run, and Pi's next message is the reply. System
+		// messages inside the run add nothing to the prompt.
 		let end = index;
 		while (end < priors.length && (priors[end].role === "user" || priors[end].role === "system" || isSkippedAssistant(priors[end]))) end++;
 		const run = priors.slice(index, end);
-		const noted = notes !== undefined && run.some((message) => notes.has(message));
-		if (run.filter((message) => message.role !== "system").length < (noted ? 1 : 2) || end === priors.length) return undefined;
-		if (!sameContent(content, noted ? [promptForm(run, notes), promptForm(run)] : [promptForm(run)])) return undefined;
+		if (run.filter((message) => message.role !== "system").length < 2 || end === priors.length || !sameContent(content, [promptForm(run)])) return undefined;
 		return trailing(at + 1, at, end);
-	};
-
-	// A system message's note as the import writes it: a user record of its own.
-	const matchNote = (at: number, index: number): GroupMatch | undefined => {
-		const record = chain[at];
-		const note = notes?.get(priors[index]);
-		if (!note || record?.type !== "user" || record.isMeta === true || !sameContent(recordMessage(record).content, [note])) return undefined;
-		return trailing(at + 1, at, index + 1);
 	};
 
 	// An assistant message: its records sharing one message id, then every
@@ -536,24 +523,17 @@ export function planNativePrefix(
 	const ends: PrefixEnd[] = [];
 	while (index < limit) {
 		const message = priors[index];
-		if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult" && !notes?.has(message)) {
+		if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
 			index++;
 			continue;
 		}
 		let start = position;
 		while (start < chain.length && isLeadingCarry(chain[start])) start++;
 		// A failed or cut-off reply can open a prompt run (user-prompt.ts
-		// promptRunStart), and so can a system message with a note.
-		const group = message.role === "system" ? matchPrompt(start, index) ?? matchNote(start, index)
-			: message.role === "user" || isSkippedAssistant(message) ? matchPrompt(start, index)
+		// promptRunStart).
+		const group = message.role === "user" || isSkippedAssistant(message) ? matchPrompt(start, index)
 			: message.role === "assistant" ? matchTurn(start, index)
 			: undefined;
-		// A note that matched nothing may be one a session from before notes
-		// never got: the prompt after it is compared without it.
-		if (!group && message.role === "system") {
-			index++;
-			continue;
-		}
 		// What the import writes nothing for otherwise: a failed or aborted
 		// reply with its results. It counts as covered only once a group after
 		// it matches.

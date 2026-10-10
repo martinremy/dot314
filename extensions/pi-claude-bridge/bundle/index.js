@@ -371,11 +371,35 @@ var PI_DEFAULT_PREAMBLE = "You are an expert coding assistant operating inside p
 function hasPiDefaultBase(prompt, preamble) {
   return preamble !== void 0 ? preamble === PI_DEFAULT_PREAMBLE : prompt.startsWith(PI_DEFAULT_PREAMBLE);
 }
+function piBaseAt(prompt, at2) {
+  const base = prompt.slice(at2);
+  return base.startsWith(PI_DEFAULT_PREAMBLE) && piBlockRange(base, PI_TOOLS_BLOCK)?.[0] === PI_DEFAULT_PREAMBLE.length && piBlockRange(base, PI_DOCS_BLOCK) !== void 0;
+}
+function piBaseAfterHookText(prompt) {
+  const at2 = prompt.indexOf(`
+
+${PI_DEFAULT_PREAMBLE}${PI_TOOLS_BLOCK.open}`);
+  return at2 !== -1 && piBaseAt(prompt, at2 + 2) ? at2 + 2 : void 0;
+}
+function carriesPiDefaultBase(prompt) {
+  return piBaseAt(prompt, 0) || piBaseAfterHookText(prompt) !== void 0;
+}
 function resolveSystemPrompt(prompt, modelKey, config2 = {}, preamble) {
   const replacement = `${config2.includeModelLine ? `Active model: ${modelKey}
 
 ` : ""}${config2.replacement ?? ""}`.trim();
   if (!replacement) return prompt;
+  const base = preamble === void 0 && !prompt.startsWith(PI_DEFAULT_PREAMBLE) ? piBaseAfterHookText(prompt) : void 0;
+  if (base !== void 0) {
+    const resolved = resolveSystemPrompt(prompt.slice(base), modelKey, config2);
+    if (config2.preservePiContext === false) return resolved;
+    const lead = prompt.slice(0, base - 2);
+    const head = lead === replacement || lead.startsWith(`${replacement}
+`) ? lead : `${replacement}
+
+${lead}`;
+    return `${head}${resolved.slice(replacement.length)}`;
+  }
   if (!hasPiDefaultBase(prompt, preamble)) {
     if (prompt === replacement || prompt.startsWith(`${replacement}
 `)) return prompt;
@@ -1148,6 +1172,11 @@ function isClaudeAssistant(msg) {
 function isSkippedAssistant(msg) {
   return msg.role === "assistant" && (msg.stopReason === "error" || msg.stopReason === "aborted");
 }
+function lastConversationIndex(messages) {
+  let index = messages.length - 1;
+  while (index >= 0 && messages[index].role === "system") index--;
+  return index;
+}
 function claudeThinkingToAnthropic(block) {
   const sig = block.thinkingSignature;
   if (!sig) return void 0;
@@ -1312,23 +1341,36 @@ function convertPiMessages(messages, customToolNameToSdk, opts = {}) {
 }
 
 // src/user-prompt.ts
+var INTERRUPTED_MARKER = "[Request interrupted by user]";
+function promptRunStart(messages) {
+  let start = lastConversationIndex(messages);
+  if (messages[start]?.role !== "user") return start;
+  while (start > 0 && (messages[start - 1].role === "user" || messages[start - 1].role === "system" || isSkippedAssistant(messages[start - 1]))) start--;
+  return start;
+}
+function promptParts(run) {
+  const messages = run.filter((message) => message.role !== "system");
+  if (!messages.some((message) => message.role === "user")) return null;
+  if (messages.some((message) => message.role !== "user" && !isSkippedAssistant(message))) return null;
+  return messages.flatMap((message) => message.role === "user" ? [message.content] : message.role === "assistant" && message.stopReason === "aborted" ? [INTERRUPTED_MARKER] : []);
+}
 function slashLed(content) {
   const texts = typeof content === "string" ? [content] : content.flatMap((block) => block.type === "text" ? [block.text] : []);
   return texts.some((text) => text.trimStart().startsWith("/"));
 }
 function extractUserPrompt(messages) {
-  if (messages.length === 0 || messages.some((message) => message.role !== "user")) return null;
-  return messages.map(
-    (message) => typeof message.content === "string" ? message.content : messageContentToText(message.content) || ""
-  ).join("\n\n");
+  const parts = promptParts(messages);
+  if (!parts) return null;
+  return parts.map((content) => typeof content === "string" ? content : messageContentToText(content) || "").join("\n\n");
 }
 function extractUserPromptBlocks(messages) {
-  if (messages.length === 0 || messages.some((message) => message.role !== "user")) return null;
+  const parts = promptParts(messages);
+  if (!parts) return null;
   let hasImage = false;
   const blocks = [];
-  for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-    const content = messages[messageIndex].content;
-    if (messageIndex > 0) blocks.push({ type: "text", text: "\n\n" });
+  for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+    const content = parts[partIndex];
+    if (partIndex > 0) blocks.push({ type: "text", text: "\n\n" });
     if (typeof content === "string") {
       if (content) blocks.push({ type: "text", text: content });
       continue;
@@ -1365,6 +1407,7 @@ var OPUS_5_5_MODEL_ID = "claude-opus-5-5";
 var OPUS_5_MODEL_ID = "claude-opus-5";
 var SONNET_5_5_MODEL_ID = "claude-sonnet-5-5";
 var SONNET_5_MODEL_ID = "claude-sonnet-5";
+var HAIKU_5_5_MODEL_ID = "claude-haiku-5-5";
 function fallbackModelForPrimaryModel(modelId) {
   return modelId === FABLE_MODEL_ID || modelId === OPUS_5_5_MODEL_ID || modelId === OPUS_5_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : void 0;
 }
@@ -1378,6 +1421,7 @@ var MODEL_IDS_IN_ORDER = [
   SONNET_5_5_MODEL_ID,
   SONNET_5_MODEL_ID,
   "claude-sonnet-4-6",
+  HAIKU_5_5_MODEL_ID,
   "claude-haiku-4-5"
 ];
 var FALLBACK_MODELS = {
@@ -1431,6 +1475,15 @@ var FALLBACK_MODELS = {
     name: "Claude Sonnet 5",
     reasoning: true,
     thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+    input: ["text", "image"],
+    contextWindow: 1e6,
+    maxTokens: 128e3
+  },
+  [HAIKU_5_5_MODEL_ID]: {
+    id: HAIKU_5_5_MODEL_ID,
+    name: "Claude Haiku 5.5",
+    reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh", max: "max" },
     input: ["text", "image"],
     contextWindow: 1e6,
     maxTokens: 128e3
@@ -1538,7 +1591,7 @@ var TOLD = {
   partial_tool_calls_pruned: { sentence: "A response ended with tool calls whose arguments never finished; the bridge dropped them.", errorShown: false },
   deferred_user_messages_dropped: { sentence: "Mid-turn messages that were waiting for delivery were dropped.", errorShown: false }
 };
-var STORE_SYMBOL = /* @__PURE__ */ Symbol.for("pi-claude-bridge.agent-notices.v1");
+var STORE_SYMBOL = /* @__PURE__ */ Symbol.for("pi-claude-bridge.agent-notices.v2");
 function store() {
   const host = globalThis;
   let sessions = host[STORE_SYMBOL];
@@ -1550,7 +1603,7 @@ function store() {
 }
 function sessionNotices(sessionId) {
   const sessions = store();
-  const notices = sessions.get(sessionId) ?? { told: /* @__PURE__ */ new Set(), pending: [] };
+  const notices = sessions.get(sessionId) ?? { told: /* @__PURE__ */ new Set(), pending: [], toldFromSubagents: /* @__PURE__ */ new Set() };
   sessions.delete(sessionId);
   sessions.set(sessionId, notices);
   for (const id of sessions.keys()) {
@@ -1578,27 +1631,45 @@ function noteAnomaly(kind, owner) {
   notices.pending.push(kind);
   debug(`agent notice: ${kind} queued for session ${sessionId.slice(0, 8)}`);
 }
-function noticeText(kinds) {
+function notePromptSource(sessionId, typedByPerson) {
+  const notices = sessionNotices(sessionId);
+  if (typedByPerson) notices.promptedBy = "person";
+  else notices.promptedBy ??= "agent";
+}
+function noticeText(kinds, subagentKinds) {
+  const lines = [
+    ...kinds.map((kind) => ({ kind, prefix: "" })),
+    ...subagentKinds.map((kind) => ({ kind, prefix: "In a subagent: " }))
+  ].map(({ kind, prefix }) => `- ${prefix}${TOLD[kind].sentence.replace(/\.$/, "")} (${kind}; ${TOLD[kind].errorShown ? "an error was shown" : "the bridge recovered"})`);
   const room = MESSAGE_LINES - 2;
-  const shown = kinds.length > room ? kinds.slice(0, room - 1) : kinds;
+  const shown = lines.length > room ? lines.slice(0, room - 1) : lines;
   return [
-    `Claude bridge: ${kinds.length === 1 ? "1 anomaly" : `${kinds.length} anomalies`} since your last message.`,
-    ...shown.map((kind) => `- ${TOLD[kind].sentence.replace(/\.$/, "")} (${kind}; ${TOLD[kind].errorShown ? "an error was shown" : "the bridge recovered"})`),
-    ...kinds.length > shown.length ? [`- \u2026 and ${kinds.length - shown.length} more`] : [],
+    `Claude bridge: ${lines.length === 1 ? "1 anomaly" : `${lines.length} anomalies`} since your last message.`,
+    ...shown,
+    ...lines.length > shown.length ? [`- \u2026 and ${lines.length - shown.length} more`] : [],
     DEBUG ? `Details are in the bridge debug log (${displayPath(DEBUG_LOG_PATH)}) and diag log (${displayPath(diagLogPath())}). If one looks like a bridge bug, tell the user.` : "The bridge did not record details; the user can set CLAUDE_BRIDGE_DEBUG=1 to record them in the bridge logs. If one looks like a bridge bug, tell the user."
   ].join("\n");
 }
 function takeAgentNotice(sessionId) {
-  const notices = store().get(sessionId);
-  if (!notices || notices.pending.length === 0) return void 0;
-  if (!agentNoticesEnabled()) return void 0;
-  const kinds = sessionNotices(sessionId).pending.splice(0);
+  if (store().get(sessionId)?.promptedBy !== "person" || !agentNoticesEnabled()) return void 0;
+  const notices = sessionNotices(sessionId);
+  const kinds = notices.pending.splice(0);
+  const subagentKinds = [];
+  for (const other of store().values()) {
+    if (other.promptedBy !== "agent") continue;
+    for (const kind of other.pending.splice(0)) {
+      if (notices.toldFromSubagents.has(kind)) continue;
+      notices.toldFromSubagents.add(kind);
+      subagentKinds.push(kind);
+    }
+  }
+  if (kinds.length === 0 && subagentKinds.length === 0) return void 0;
   return {
     message: {
       customType: AGENT_NOTICE_TYPE,
-      content: noticeText(kinds),
+      content: noticeText(kinds, subagentKinds),
       display: true,
-      details: { kinds }
+      details: { kinds, ...subagentKinds.length > 0 ? { subagentKinds } : {} }
     }
   };
 }
@@ -1832,6 +1903,16 @@ var QueryContext = class {
   /** Pi replaced the history while this query was active. Its next callback
    *  must use the new context instead of resuming the stale Claude session. */
   piHistoryReplaced = false;
+  /** Its Pi session ended while it still streamed a reply (an RPC reload
+   *  does not wait for one). The reply may finish, but no callback can reach
+   *  the query once its lane is gone, so it closes when the reply ends at a
+   *  tool call (endToolUseTurn). */
+  sessionEnded = false;
+  /** Pi replaced the history after this lane's query ended. A request that
+   *  then ends at a tool result is Pi retrying the turn (an overflow: the
+   *  query died on "Prompt is too long" and Pi compacted), which no query
+   *  will continue, so it restarts the turn on the new history. */
+  historyReplacedAfterQuery = false;
   reportedHistoryRestartDecline = false;
   restartRequest = null;
   latestCursor = 0;
@@ -2554,21 +2635,29 @@ function handedToPi(queryCtx, ids) {
 }
 function requestLaneFor(sessionId, messages, otherConversation = () => false) {
   const own = peekQueryContext(sessionId);
-  const ids = contextToolCallIds(messages);
-  if (ids.length > 0) {
-    if (own && handedToPi(own, ids)) return sessionId;
-    for (const [forkId2, fork] of forkLaneStore()) {
-      if (fork.base !== sessionId) continue;
-      const forkCtx = peekQueryContext(forkId2);
-      if (forkCtx && handedToPi(forkCtx, ids)) return forkId2;
-    }
-  }
-  const reason = contextInUse(own) ? "its lane is busy" : messages.at(-1)?.role === "toolResult" ? "its tool result answers no call of its lane" : otherConversation(sessionId) ? "its lane holds another conversation" : void 0;
+  const callback = callbackLane(sessionId, messages);
+  if (callback !== null) return callback;
+  const reason = contextInUse(own) ? "its lane is busy" : messages[lastConversationIndex(messages)]?.role === "toolResult" ? "its tool result answers no call of its lane" : otherConversation(sessionId) ? "its lane holds another conversation" : void 0;
   if (reason === void 0) return sessionId;
   const forkId = `${FORK_LANE_PREFIX}${randomUUID()}`;
   forkLaneStore().set(forkId, { base: sessionId });
   debug(`provider: request (session ${sessionId === void 0 ? "none" : sessionId.slice(0, 8)}) is not its lane's callback and ${reason}; running it as its own query in ${forkId}`);
   return forkId;
+}
+function callbackLane(sessionId, messages) {
+  const ids = contextToolCallIds(messages);
+  if (ids.length === 0) return null;
+  const own = peekQueryContext(sessionId);
+  if (own && handedToPi(own, ids)) return sessionId;
+  for (const [forkId, fork] of forkLaneStore()) {
+    if (fork.base !== sessionId) continue;
+    const forkCtx = peekQueryContext(forkId);
+    if (forkCtx && handedToPi(forkCtx, ids)) return forkId;
+  }
+  return null;
+}
+function idleForHostResume(sessionId, messages) {
+  return !contextInUse(peekQueryContext(sessionId)) && callbackLane(sessionId, messages) === null;
 }
 function piSessionOfLane(laneId) {
   const fork = laneId === void 0 ? void 0 : forkLaneStore().get(laneId);
@@ -2579,6 +2668,11 @@ function isForkLane(laneId) {
 }
 function releaseForkLane(laneId) {
   forkLaneStore().delete(laneId);
+}
+function sessionQueryContexts(sessionId) {
+  const contexts = [peekQueryContext(sessionId)];
+  for (const [forkId, fork] of forkLaneStore()) if (fork.base === sessionId) contexts.push(peekQueryContext(forkId));
+  return contexts.filter((queryCtx) => queryCtx !== void 0);
 }
 function laneInUse(laneId) {
   return contextInUse(peekQueryContext(laneId));
@@ -2609,22 +2703,6 @@ function loopStore() {
 }
 var ms = (value) => Math.round(value * 10) / 10;
 var RequestTiming = class {
-  constructor(lane2, model, msgs) {
-    this.lane = lane2;
-    this.model = model;
-    this.msgs = msgs;
-    const loop = loopStore();
-    this.startedAt = ++loop.started;
-    if (loop.live++ === 0) {
-      loop.monitor ??= monitorEventLoopDelay();
-      loop.monitor.reset();
-      loop.monitor.enable();
-    }
-    this.sharedAtStart = loop.live > 1;
-  }
-  lane;
-  model;
-  msgs;
   seq = nextSeq++;
   kind = "fresh";
   sync;
@@ -2642,6 +2720,22 @@ var RequestTiming = class {
   debugStart = debugWriteTotals();
   startedAt;
   sharedAtStart;
+  lane;
+  model;
+  msgs;
+  constructor(lane2, model, msgs) {
+    this.lane = lane2;
+    this.model = model;
+    this.msgs = msgs;
+    const loop = loopStore();
+    this.startedAt = ++loop.started;
+    if (loop.live++ === 0) {
+      loop.monitor ??= monitorEventLoopDelay();
+      loop.monitor.reset();
+      loop.monitor.enable();
+    }
+    this.sharedAtStart = loop.live > 1;
+  }
   /** Records the first time `name` happens in this request. */
   phase(name) {
     if (this.settled || this.phases[name] !== void 0) return;
@@ -2820,26 +2914,30 @@ function deliveredSuffix(messages, from, to2, ledger, opts) {
 }
 function sharedHistoryMatches(record2, messages, promptStart) {
   const prior = historyDigestMatches(record2.historyDigest, messages.slice(0, record2.cursor));
-  if (!prior.matches || !prior.checked || promptStart !== record2.cursor + 1) return prior;
-  return { matches: record2.trailingAssistantDigest === historyDigest(messages.slice(record2.cursor, promptStart)), checked: true };
+  const reply = messages.slice(record2.cursor, promptStart);
+  if (!prior.matches || !prior.checked || !reply.some((message) => message.role === "assistant")) return prior;
+  return { matches: record2.trailingAssistantDigest === historyDigest(reply), checked: true };
 }
 
 // src/pi-sessions.ts
-var LIVE_SESSIONS_SYMBOL = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.live-pi-sessions.v1");
+var LIVE_SESSIONS_SYMBOL = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.live-pi-sessions.v2");
 function liveSessions() {
   const host = globalThis;
   let sessions = host[LIVE_SESSIONS_SYMBOL];
   if (!sessions) {
-    sessions = /* @__PURE__ */ new Set();
+    sessions = /* @__PURE__ */ new Map();
     host[LIVE_SESSIONS_SYMBOL] = sessions;
   }
   return sessions;
 }
-function notePiSessionStarted(sessionId) {
-  liveSessions().add(sessionId);
+function notePiSessionStarted(sessionId, cwd) {
+  liveSessions().set(sessionId, cwd);
 }
 function notePiSessionEnded(sessionId) {
   liveSessions().delete(sessionId);
+}
+function piSessionCwd(sessionId) {
+  return (sessionId === void 0 ? void 0 : liveSessions().get(sessionId)) ?? process.cwd();
 }
 function piMainPromptEvidence(origin) {
   if (!origin) return void 0;
@@ -2957,7 +3055,8 @@ var REBUILD_MARKS = [
   "steering-write",
   "steering-failed",
   "tool-results-outstanding",
-  "orphan-unverified"
+  "orphan-unverified",
+  "host-resumed"
 ];
 var SHARED_SESSION_LANES_SYMBOL = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.shared-session-lanes.v1");
 function sharedSessionLaneStore() {
@@ -3005,9 +3104,9 @@ function startedLaneStore() {
   }
   return store2;
 }
-function recordStartedLane(sessionManager, sessionId) {
+function recordStartedLane(sessionManager, sessionId, cwd) {
   startedLaneStore().set(sessionManager, sessionId);
-  notePiSessionStarted(sessionId);
+  notePiSessionStarted(sessionId, cwd);
 }
 function takeStartedLane(sessionManager) {
   const store2 = startedLaneStore();
@@ -3750,6 +3849,7 @@ function endToolUseTurn(c) {
   c.currentPiStream.push({ type: "done", reason: "toolUse", message });
   c.currentPiStream.end();
   c.currentPiStream = null;
+  if (c.sessionEnded) c.onRequestAbort?.();
 }
 function cancelScheduledToolUseEnd(c) {
   if (!c.scheduledToolUseEnd) return;
@@ -47932,6 +48032,8 @@ function normalizeBlocks(content) {
       blocks.push({ type: "text", text: block.text });
     } else if (block.type === "image" && isObject3(block.source) && block.source.type === "base64") {
       blocks.push({ type: "image", source: { type: "base64", media_type: block.source.media_type, data: block.source.data } });
+    } else if (block.type === "image" && block.source === void 0) {
+      blocks.push({ type: "image" });
     } else {
       return void 0;
     }
@@ -47953,8 +48055,22 @@ function promptForm(messages) {
 function deliveredResultForm(message, toolName) {
   const blocks = toolResultToMcpContent(message.content);
   const failed = message.isError === true;
-  if (toolName !== void 0 && !failed && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
+  if (failed) return blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim() || "Command failed with no output";
+  if (toolName !== void 0 && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
   return blocks.map((block) => block.type === "text" ? { type: "text", text: block.text } : { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
+}
+function imagesByPlace(content) {
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  if (!Array.isArray(blocks)) return content;
+  const placed = [];
+  for (const block of blocks) {
+    if (!isObject3(block)) return content;
+    const previous = placed.at(-1);
+    if (block.type === "image") placed.push({ type: "image" });
+    else if (isObject3(previous) && previous.type === "image" && block.type === "text" && typeof block.text === "string" && block.text.startsWith("[Image: source: ") && block.text.endsWith("]")) continue;
+    else placed.push(block);
+  }
+  return placed;
 }
 function promptMatches(record2, message) {
   return sameContent(recordMessage(record2).content, [promptForm([message]), userMessageToAnthropic(message).content]);
@@ -47962,7 +48078,8 @@ function promptMatches(record2, message) {
 function toolResultMatches(block, message, toolName) {
   if (block.is_error === true !== (message.isError === true)) return false;
   const content = message.content;
-  return sameContent(block.content, [deliveredResultForm(message, toolName), toolResultContentToAnthropic(content) || ""]);
+  const expected = [deliveredResultForm(message, toolName), toolResultContentToAnthropic(content) || ""];
+  return sameContent(imagesByPlace(block.content), expected.map(imagesByPlace));
 }
 function streamedPiBlock(block, customToolNameToPi) {
   if (!isObject3(block)) return void 0;
@@ -47988,11 +48105,10 @@ function storedPiBlock(block) {
       return block;
   }
 }
-function trimmedSignedThinking(native, stored) {
+function sameSignedThinking(native, stored) {
   if (!isObject3(native) || !isObject3(stored) || native.type !== "thinking" || stored.type !== "thinking" || stored.redacted === true) return false;
   const signature = native.signature;
-  if (typeof signature !== "string" || signature === "" || stored.thinkingSignature !== signature) return false;
-  return typeof native.thinking === "string" && stored.thinking === native.thinking.trimEnd();
+  return typeof signature === "string" && signature !== "" && stored.thinkingSignature === signature;
 }
 function streamedMatches(blocks, message, customToolNameToPi) {
   const assistant = message;
@@ -48001,7 +48117,7 @@ function streamedMatches(blocks, message, customToolNameToPi) {
   if (!Array.isArray(content) || content.length !== blocks.length) return false;
   return blocks.every((block, n) => {
     const streamed = streamedPiBlock(block, customToolNameToPi);
-    return streamed !== void 0 && (isDeepStrictEqual(streamed, storedPiBlock(content[n])) || trimmedSignedThinking(block, content[n]));
+    return streamed !== void 0 && (isDeepStrictEqual(streamed, storedPiBlock(content[n])) || sameSignedThinking(block, content[n]));
   });
 }
 function importedMatches(blocks, message, customToolNameToSdk) {
@@ -48023,9 +48139,6 @@ function importedBlockMatches(native, expected) {
     default:
       return false;
   }
-}
-function isSkippedAssistant2(message) {
-  return message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
 }
 function readTranscript(path) {
   let text;
@@ -48084,24 +48197,50 @@ function planNativePrefix(priors, oldSessionId, cwd, claudeDir, customToolNameTo
   const { chain } = walked;
   const transcript = forkSlice(read.records);
   const stitched = stitchedRecords(transcript, chain);
+  const unreplayable = unreplayableTrailingTurns(priors);
+  const limit = unreplayable.size > 0 ? Math.min(...unreplayable) : priors.length;
+  const steerRun = (record2, next) => {
+    const prompt = isObject3(record2.attachment) ? record2.attachment.prompt : void 0;
+    const run = [];
+    for (let index2 = next; index2 < limit; index2++) {
+      const message = priors[index2];
+      if (message.role === "system") continue;
+      if (message.role !== "user") break;
+      run.push(message);
+      if (sameContent(prompt, [promptForm(run)])) return index2 + 1;
+    }
+    return void 0;
+  };
   const trailing = (from, last, next, verified = []) => {
     let end2 = from;
     let cut2 = last;
-    while (end2 < chain.length && isTrailingCarry(chain[end2])) {
-      if (chain[end2].type !== "progress") cut2 = end2;
+    const steers = [];
+    while (end2 < chain.length) {
+      const record2 = chain[end2];
+      if (isTrailingCarry(record2)) {
+        if (record2.type !== "progress") cut2 = end2;
+        end2++;
+        continue;
+      }
+      const after = isQueuedCommand(record2) ? steerRun(record2, next) : void 0;
+      if (after === void 0) break;
+      steers.push(record2.uuid);
+      next = after;
+      cut2 = end2;
       end2++;
     }
-    return { next, last: cut2, end: end2, stop: end2 < chain.length && isQueuedCommand(chain[end2]), stitched: verified };
+    return { next, last: cut2, end: end2, stop: end2 < chain.length && isQueuedCommand(chain[end2]), stitched: verified, steers };
   };
   const matchPrompt = (at2, index2) => {
     const record2 = chain[at2];
     if (!record2 || record2.type !== "user" || record2.isMeta === true) return void 0;
     const content = recordMessage(record2).content;
     if (Array.isArray(content) && content.some((block) => isObject3(block) && block.type === "tool_result")) return void 0;
-    if (promptMatches(record2, priors[index2])) return trailing(at2 + 1, at2, index2 + 1);
+    if (priors[index2].role === "user" && promptMatches(record2, priors[index2])) return trailing(at2 + 1, at2, index2 + 1);
     let end2 = index2;
-    while (end2 < priors.length && priors[end2].role === "user") end2++;
-    if (end2 - index2 < 2 || end2 === priors.length || !sameContent(content, [promptForm(priors.slice(index2, end2))])) return void 0;
+    while (end2 < priors.length && (priors[end2].role === "user" || priors[end2].role === "system" || isSkippedAssistant(priors[end2]))) end2++;
+    const run = priors.slice(index2, end2);
+    if (run.filter((message) => message.role !== "system").length < 2 || end2 === priors.length || !sameContent(content, [promptForm(run)])) return void 0;
     return trailing(at2 + 1, at2, end2);
   };
   const matchTurn = (at2, index2) => {
@@ -48172,25 +48311,23 @@ ${record2.uuid}`);
   let position = 0;
   let index = 0;
   const ends = [];
-  const unreplayable = unreplayableTrailingTurns(priors);
-  const limit = unreplayable.size > 0 ? Math.min(...unreplayable) : priors.length;
   while (index < limit) {
     const message = priors[index];
-    if (isSkippedAssistant2(message)) {
-      index++;
-      while (index < priors.length && priors[index].role === "toolResult") index++;
-      continue;
-    }
     if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
       index++;
       continue;
     }
     let start = position;
     while (start < chain.length && isLeadingCarry(chain[start])) start++;
-    const group = message.role === "user" ? matchPrompt(start, index) : message.role === "assistant" ? matchTurn(start, index) : void 0;
+    const group = message.role === "user" || isSkippedAssistant(message) ? matchPrompt(start, index) : message.role === "assistant" ? matchTurn(start, index) : void 0;
+    if (!group && isSkippedAssistant(message)) {
+      index++;
+      while (index < priors.length && priors[index].role === "toolResult") index++;
+      continue;
+    }
     if (!group) break;
     index = group.next;
-    ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched });
+    ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched, steers: group.steers });
     position = group.end;
     if (group.stop) break;
   }
@@ -48236,11 +48373,12 @@ function lastCarriedExactly(transcript, chain, ends) {
   const verifiedThrough = [];
   let verified = 0;
   for (const end of ends) verifiedThrough.push(verified += end.stitched.length);
-  const steer = transcript.findIndex(isQueuedCommand);
   let steered = false;
   for (let n = ends.length - 1; n >= 0; n--) {
     const { cut } = ends[n];
     const at2 = position.get(chain[cut].uuid);
+    const matched = new Set(ends.slice(0, n + 1).flatMap((end) => end.steers));
+    const steer = transcript.findIndex((record2) => isQueuedCommand(record2) && !matched.has(record2.uuid));
     if (steer !== -1 && at2 >= steer) {
       steered = true;
       continue;
@@ -48733,22 +48871,26 @@ function convertAndImportMessages(session, messages, customToolNameToSdk, cwd) {
 }
 function planIncrementalPromptBatch(messages, cursor) {
   const lastIndex = messages.length - 1;
-  if (lastIndex < 0 || messages[lastIndex].role !== "user") return void 0;
+  if (messages[lastConversationIndex(messages)]?.role !== "user") return void 0;
   if (cursor > lastIndex) {
     debug(`planIncrementalPromptBatch: rejected \u2014 cursor=${cursor} beyond last index ${lastIndex}; messages are not the conversation this cursor describes`);
     return void 0;
   }
   const boundedCursor = Math.max(0, cursor);
   let promptStart = boundedCursor;
-  if (messages[promptStart]?.role === "assistant") promptStart++;
+  let reply = promptStart;
+  while (messages[reply]?.role === "system") reply++;
+  if (messages[reply]?.role === "assistant") promptStart = reply + 1;
   const pendingPrompts = messages.slice(promptStart);
-  if (pendingPrompts.length === 0 || pendingPrompts.some((message) => message.role !== "user")) {
+  const pendingRoles = pendingPrompts.map((message) => message.role);
+  const userMessageCount = pendingRoles.filter((role) => role === "user").length;
+  if (userMessageCount === 0 || pendingRoles.some((role) => role !== "user" && role !== "system")) {
     debug(`planIncrementalPromptBatch: rejected \u2014 cursor=${cursor} promptStart=${promptStart} tail roles=[${messages.slice(boundedCursor).map((m) => m.role).join(", ")}]`);
     return void 0;
   }
   return {
     promptStart,
-    userMessageCount: pendingPrompts.length
+    userMessageCount
   };
 }
 function verifyWrittenSession2(jsonlPath, expectedSessionId, expectedRecordCount, cwd, claudeDir) {
@@ -48790,7 +48932,8 @@ function debugSessionPaths(label, cwd, jsonlPath, claudeDir) {
 }
 function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account, options = {}) {
   const sharedSession = getSharedSession();
-  const priorMessages = messages.slice(0, -1);
+  const promptStart = promptRunStart(messages);
+  const priorMessages = messages.slice(0, promptStart);
   const accountProfileId = account?.accountProfileId;
   const scopeConfigDir = account?.claudeConfigDir;
   const claudeDir = scopeConfigDir ?? process.env.CLAUDE_CONFIG_DIR;
@@ -48804,7 +48947,7 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
       `Case 6 foreign-conversation: fingerprint ${incomingFingerprint.slice(0, 8)} != record ${sharedSession.conversationFingerprint?.slice(0, 8)} (cursor=${sharedSession.cursor}, priors=${priorMessages.length}) \u2014 clean one-shot, record untouched`
     );
     debug(`syncResult: path=foreign-one-shot cause=foreign-conversation`);
-    return { sessionId: null, promptStart: messages.length - 1, foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
+    return { sessionId: null, promptStart: lastConversationIndex(messages), foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
   }
   let digestCause;
   if (sharedSession && sameAccount && !sharedSession.needsRebuild) {
@@ -48839,7 +48982,7 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
   if (priorMessages.every((message) => message.role === "system")) {
     debug(`Case 1: clean start, ${messages.length} total messages, account=${accountProfileId ?? "default"}`);
     debug(`syncResult: path=clean-start cause=clean-start${mark ? ` mark=${mark}` : ""}`);
-    return { sessionId: null, promptStart: messages.length - 1, sync: { path: "clean-start", cause: "clean-start", ...mark ? { mark } : {} } };
+    return { sessionId: null, promptStart, sync: { path: "clean-start", cause: "clean-start", ...mark ? { mark } : {} } };
   }
   const replacedSessionId = sharedSession?.sessionId;
   const previousSessionId = sameAccount ? sharedSession?.sessionId : void 0;
@@ -48862,7 +49005,8 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
         cause,
         mark,
         previousCursor,
-        incomingFingerprint
+        incomingFingerprint,
+        promptStart
       });
     }
     debug(`Case 4: no native prefix to fork from ${previousSessionId.slice(0, 8)} (${plan.reason}) \u2014 importing all ${priorMessages.length} pi msgs`);
@@ -48878,6 +49022,7 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
     ...modelId ? { model: modelId } : {}
   });
   convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
+  endOnAssistant(session);
   session.save();
   verifyWrittenSession2(session.jsonlPath, session.sessionId, session.messages.length, cwd, claudeDir);
   stepEnd("rebuildWrite", writeStarted);
@@ -48907,9 +49052,15 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
   debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${replacedSessionId === void 0 ? "first" : !sameAccount ? "account-rotated" : preserveId ? "preserved" : "rotated-post-abort"} cause=${cause}${mark ? ` mark=${mark}` : ""} missed=${missed}`);
   return {
     sessionId: session.sessionId,
-    promptStart: messages.length - 1,
+    promptStart,
     sync: { path: "rebuild", cause, ...mark ? { mark } : {}, priors: priorMessages.length, missed }
   };
+}
+function endOnAssistant(session, before = []) {
+  const turns = [...before, ...session.records].filter((record2) => record2.type === "user" || record2.type === "assistant");
+  if (turns.at(-1)?.type !== "user") return;
+  session.addAssistantMessage([{ type: "text", text: INTERRUPTED_MARKER }], { model: "<synthetic>" });
+  Object.assign(session.records.at(-1), { isVirtual: true });
 }
 function writeNewSessionFile(path, data) {
   const fd2 = openSync4(path, "wx");
@@ -48925,7 +49076,7 @@ function writeNewSessionFile(path, data) {
   }
 }
 async function rebuildFromNativePrefix(prefix, c) {
-  const priorMessages = c.messages.slice(0, -1);
+  const priorMessages = c.messages.slice(0, c.promptStart);
   const oldId = prefix.oldSessionId.slice(0, 8);
   const replan = (why) => {
     debug(`Case 4: ${why} \u2014 syncing again without a fork`);
@@ -48943,7 +49094,7 @@ async function rebuildFromNativePrefix(prefix, c) {
     debug(`syncResult: path=rebuild cancelled cause=${c.cause}${c.mark ? ` mark=${c.mark}` : ""}`);
     return {
       sessionId: null,
-      promptStart: c.messages.length - 1,
+      promptStart: c.promptStart,
       cancelled: true,
       sync: { path: "rebuild", cause: c.cause, ...c.mark ? { mark: c.mark } : {}, priors: priorMessages.length }
     };
@@ -48960,6 +49111,7 @@ async function rebuildFromNativePrefix(prefix, c) {
     ...c.modelId ? { model: c.modelId } : {}
   });
   if (tail.length > 0) convertAndImportMessages(session, tail, c.customToolNameToSdk, c.cwd);
+  endOnAssistant(session, forked.entries);
   const tailRecords = session.records.map((record2, n) => n === 0 ? { ...record2, parentUuid: forked.leafUuid } : record2);
   const lines = [...forked.entries, ...tailRecords].map((record2) => `${serializeRecord(record2)}
 `).join("");
@@ -48999,7 +49151,7 @@ async function rebuildFromNativePrefix(prefix, c) {
   debug(`syncResult: path=rebuild sessionId=${forked.sessionId} priors=${priorMessages.length} ${c.preserveId ? "preserved" : "rotated-post-abort"} cause=${c.cause}${c.mark ? ` mark=${c.mark}` : ""} missed=${missed} forked=${prefix.piCount} from=${oldId} forkedRecords=${forked.entries.length} appended=${appended}`);
   return {
     sessionId: forked.sessionId,
-    promptStart: c.messages.length - 1,
+    promptStart: c.promptStart,
     sync: { path: "rebuild", cause: c.cause, ...c.mark ? { mark: c.mark } : {}, priors: priorMessages.length, missed, forked: prefix.piCount }
   };
 }
@@ -49252,8 +49404,10 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
         break;
       case "assistant": {
         const sdkError = message.error;
-        if (sdkError && account) {
-          if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: String(sdkError) });
+        if (sdkError) {
+          const content = message.message?.content;
+          const notice = (Array.isArray(content) ? content : []).flatMap((block) => block?.type === "text" && block.text ? [block.text] : []).join("\n").trim();
+          if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: notice || String(sdkError) });
           break;
         }
         if (!streamLive && !queryCtx.turnSawToolCall) break;
@@ -49262,11 +49416,12 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
       }
       case "result":
         queryCtx.timing?.phase("sdkResult");
-        if (failure && message.subtype === "success" && queryCtx.committedOutput) {
+        const legacyRecovered = !account && !message.is_error && queryBlocks(queryCtx).length > 0;
+        if (failure && message.subtype === "success" && (queryCtx.committedOutput || legacyRecovered)) {
           debug(`consumeQuery: clearing informational ${failure.kind ?? "unclassified"} failure \u2014 query recovered with committed output`);
           holdFailure(void 0);
         }
-        if (account && failure) break;
+        if (failure && (message.subtype === "success" || account)) break;
         if (!queryCtx.turnSawStreamEvent && message.subtype === "success") {
           if (!streamLive) break;
           const text = message.result || "";
@@ -49411,10 +49566,14 @@ function resolveConfiguredEffort(modelId, reasoningEffort, providerConfig) {
 }
 function outboundSystemPrompt(input) {
   const { queryModel, bridgeConfig, systemPrompt, systemPromptOrigin } = input;
+  const modelKey = `${queryModel.provider}/${queryModel.id}`;
   const evidence = piMainPromptEvidence(systemPromptOrigin);
-  if (!evidence) return { prompt: systemPrompt, source: "caller" };
+  if (!evidence) {
+    if (systemPromptOrigin?.preamble !== void 0 || !carriesPiDefaultBase(systemPrompt)) return { prompt: systemPrompt, source: "caller" };
+    return { prompt: resolveSystemPrompt(systemPrompt, modelKey, { ...bridgeConfig.systemPrompt, preservePiContext: true }), source: "caller-pi-base" };
+  }
   return {
-    prompt: resolveSystemPrompt(systemPrompt, `${queryModel.provider}/${queryModel.id}`, bridgeConfig.systemPrompt, systemPromptOrigin?.preamble),
+    prompt: resolveSystemPrompt(systemPrompt, modelKey, bridgeConfig.systemPrompt, systemPromptOrigin?.preamble),
     source: `pi-main:${evidence}`
   };
 }
@@ -49484,6 +49643,9 @@ var newAssistantMessageEventStream = typeof _piAi.createAssistantMessageEventStr
 var PRIMARY_INSTANCE_KEY = /* @__PURE__ */ Symbol.for("claude-bridge:primaryInstance");
 var ACTIVE_STREAM_SIMPLE_KEY = /* @__PURE__ */ Symbol.for("claude-bridge:activeStreamSimple");
 var ROTATION_STATE_KEY = /* @__PURE__ */ Symbol("claude-bridge:rotationState");
+var HOST_RESUME_MARKER = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.host-resume.v1");
+var HOST_RESUMED_TURN = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.host-resumed-turn.v1");
+var HOST_RESUMED_PROMPT = "Continue from the completed tool results above; do not repeat completed tool calls.";
 var MAX_ROTATION_ATTEMPTS = 16;
 var MODELS = buildModels(getModels("anthropic"));
 function extractAllToolResults2(context) {
@@ -49747,10 +49909,10 @@ function applyProviderRegistration(trigger) {
   }
 }
 var HISTORY_REPLACED_PROMPT = "The conversation above was rewritten by Pi (compaction or history navigation). It is the complete current history, including the results of every tool call that has already run. Continue the turn from there, and do not repeat a tool call whose result is already above.";
-function restartContext(request) {
+function restartContext(context) {
   return {
-    ...request.context,
-    messages: [...request.context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }]
+    ...context,
+    messages: [...context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }]
   };
 }
 function onPiHistoryReplaced(event) {
@@ -49759,10 +49921,13 @@ function onPiHistoryReplaced(event) {
   const restarts = running && !queryCtx.detachedFromSharedSession;
   if (running) {
     if (restarts) queryCtx.piHistoryReplaced = true;
-    reportToolResultMismatch(queryCtx, event, process.cwd(), { expectedInterruption: restarts });
-  } else if (queryCtx.undeliveredFailure) {
-    debug(`${event}: dropping a terminal failure held for a tool-result callback`);
-    queryCtx.undeliveredFailure = null;
+    reportToolResultMismatch(queryCtx, event, piSessionCwd(currentRequestLaneId()), { expectedInterruption: restarts });
+  } else {
+    queryCtx.historyReplacedAfterQuery = true;
+    if (queryCtx.undeliveredFailure) {
+      debug(`${event}: dropping a terminal failure held for a tool-result callback`);
+      queryCtx.undeliveredFailure = null;
+    }
   }
   debug(event + ": marking Claude session for rebuild");
   markSessionForRebuild({ reason: "history-replaced", forceRotate: restarts });
@@ -49797,10 +49962,24 @@ function verifiedHeldSuffix(queryCtx, messages, through, opts) {
   }, opts);
 }
 function streamClaudeAgentSdk(model, context, options) {
-  const laneId = requestLaneFor(options?.sessionId, context.messages, (lane2) => runInRequestLane(lane2, () => isForeignConversation(getSharedSession(), context.messages)));
-  return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options));
+  const hostResumed = isHostResumedTurn(options, context.messages);
+  if (hostResumed) debug(`provider: host-resumed turn (session ${options.sessionId.slice(0, 8)}): its query ended with the host; continuing from ${context.messages.length} messages`);
+  const laneId = hostResumed ? options.sessionId : requestLaneFor(options?.sessionId, context.messages, (lane2) => runInRequestLane(lane2, () => isForeignConversation(getSharedSession(), context.messages)));
+  return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, void 0, hostResumed));
 }
-function streamClaudeAgentSdkInLane(model, context, options, inherited) {
+function isHostResumedTurn(options, messages) {
+  const sessionId = options?.sessionId;
+  if (options?.[HOST_RESUMED_TURN] !== true || sessionId === void 0 || options?.signal?.aborted) return false;
+  const end = lastConversationIndex(messages);
+  let assistant = end;
+  while (assistant >= 0 && messages[assistant].role === "toolResult") assistant--;
+  const turn = messages[assistant];
+  if (turn?.role !== "assistant" || assistant === end) return false;
+  const calls = turn.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []);
+  const results = messages.slice(assistant + 1, end + 1).map((message) => message.toolCallId);
+  return calls.length === results.length && calls.every((id) => results.includes(id)) && idleForHostResume(sessionId, messages);
+}
+function streamClaudeAgentSdkInLane(model, context, options, inherited, hostResumed = false) {
   const laneId = currentRequestLaneId();
   const ephemeralLane = laneId !== void 0 && (options?.cacheRetention === "none" || isForkLane(laneId));
   const releaseLane = () => {
@@ -49815,16 +49994,16 @@ function streamClaudeAgentSdkInLane(model, context, options, inherited) {
   const stream = newAssistantMessageEventStream();
   const timing = inherited ?? startRequestTiming(stream, laneId, model.id, context.messages.length);
   try {
-    return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing);
+    return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed);
   } catch (error51) {
     releaseEphemeralLane();
     if (!inherited) timing?.settle("threw");
     throw error51;
   }
 }
-function streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing) {
+function streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed) {
   const lastMsgRole = context.messages[context.messages.length - 1]?.role;
-  const cwd = options?.cwd ?? process.cwd();
+  const cwd = options?.cwd ?? piSessionCwd(options?.sessionId);
   debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}`);
   if (ctx().activeQuery) {
     const queryCtx = ctx();
@@ -49948,10 +50127,14 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
     }
     return stream;
   }
-  const lastMsg = context.messages[context.messages.length - 1];
+  if (!hostResumed && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !options?.signal?.aborted) {
+    debug("provider: a tool result after Pi replaced the history of an ended query; restarting the turn on the new history");
+    context = restartContext(context);
+  }
+  const lastMsg = context.messages[lastConversationIndex(context.messages)];
   const heldForRun = ctx().undeliveredFailure;
   const steeredResultId = lastMsg?.role !== "toolResult" && heldForRun && options?.signal && !options.signal.aborted && heldForRun.runSignals.has(options.signal) ? extractAllToolResults2(context).map((result) => result.toolCallId).find((id) => id !== void 0 && heldForRun.toolCallIds.has(id)) : void 0;
-  if (lastMsg?.role === "toolResult" || steeredResultId !== void 0) {
+  if (!hostResumed && (lastMsg?.role === "toolResult" || steeredResultId !== void 0)) {
     if (timing) {
       timing.kind = "continuation";
       attachRequestTiming(ctx(), timing);
@@ -50065,6 +50248,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
   ctx().userInputNeedsRebuild = false;
   ctx().committedOutput = false;
   ctx().piHistoryReplaced = false;
+  ctx().historyReplacedAfterQuery = false;
   ctx().reportedHistoryRestartDecline = false;
   ctx().servedToolsSettling = null;
   ctx().detachedFromSharedSession = false;
@@ -50138,6 +50322,8 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
   const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : void 0;
   const accountScope = accountSessionScope(account);
   const cursorBeforeSync = getSharedSession()?.cursor ?? null;
+  if (hostResumed) markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
+  const syncMessages = hostResumed ? [...context.messages, { role: "user", content: HOST_RESUMED_PROMPT, timestamp: Date.now() }] : context.messages;
   const fresh = {
     model,
     context,
@@ -50161,10 +50347,12 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
     claudeExecutable,
     claudeExecutablePreflight,
     accountScope,
-    cursorBeforeSync
+    cursorBeforeSync,
+    hostResumed,
+    syncMessages
   };
   const requestEnded = () => options?.signal?.aborted === true || peekCtx() !== attemptCtx;
-  const synced = syncSharedSession(context.messages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
+  const synced = syncSharedSession(syncMessages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
     cancelled: requestEnded,
     customToolNameToPi
   });
@@ -50227,14 +50415,16 @@ function startFreshQuery(fresh, syncResult) {
     claudeExecutable,
     claudeExecutablePreflight,
     accountScope,
-    cursorBeforeSync
+    cursorBeforeSync,
+    hostResumed,
+    syncMessages
   } = fresh;
   const { sessionId: resumeSessionId, promptStart } = syncResult;
   timing?.noteSync(syncResult.sync, Boolean(resumeSessionId));
   const foreignContext = syncResult.foreignContext === true;
   if (foreignContext) ctx().detachedFromSharedSession = true;
   const conversationFp = foreignContext ? void 0 : conversationFingerprint(context.messages);
-  const promptMessages = context.messages.slice(promptStart);
+  const promptMessages = syncMessages.slice(promptStart);
   const promptBlocks = extractUserPromptBlocks(promptMessages);
   let promptText = extractUserPrompt(promptMessages) ?? "";
   if (!promptText.trim() && !promptBlocks) {
@@ -50364,7 +50554,7 @@ function startFreshQuery(fresh, syncResult) {
   const requestRotation = (failure) => {
     recordAttemptFailure(failure);
     const committed = abortCtx.committedOutput || attemptBuffer?.hasCommittedOutput === true;
-    const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
+    const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && !abortCtx.sessionEnded && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
     debug("provider: account rotation decision", JSON.stringify({
       eligible,
       account: account?.label,
@@ -50611,7 +50801,7 @@ function startFreshQuery(fresh, syncResult) {
         reentryStream.end();
         return;
       }
-      for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart), restart.options, restart.timing))) reentryStream.push(event);
+      for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart.context), restart.options, restart.timing))) reentryStream.push(event);
       reentryStream.end();
       return;
     }
@@ -50630,7 +50820,7 @@ function startFreshQuery(fresh, syncResult) {
     const retryStream = runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, {
       ...options ?? {},
       [ROTATION_STATE_KEY]: rotationState
-    }, timing));
+    }, timing, hostResumed));
     for await (const event of retryStream) reentryStream.push(event);
     reentryStream.end();
   }).catch((error51) => {
@@ -50673,7 +50863,7 @@ function index_default(pi2) {
     setSharedSession(null);
   };
   pi2.on("session_start", (event, ctx2) => runInRequestLane(ctx2.sessionManager.getSessionId(), () => {
-    recordStartedLane(ctx2.sessionManager, ctx2.sessionManager.getSessionId());
+    recordStartedLane(ctx2.sessionManager, ctx2.sessionManager.getSessionId(), ctx2.cwd);
     recordProjectTrust(ctx2);
     setPiUI(ctx2.ui);
     if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
@@ -50692,6 +50882,17 @@ function index_default(pi2) {
       if (event.reason === "reload" && (laneInUse(sessionId) || getSharedSession()?.forceRotate === true)) {
         noteReloadWithLiveWriter(ctx2.sessionManager);
       }
+      for (const queryCtx of sessionQueryContexts(sessionId)) {
+        if (!queryCtx.activeQuery) continue;
+        if (queryCtx.currentPiStream) {
+          queryCtx.sessionEnded = true;
+          debug(`session_shutdown: a query of session ${sessionId.slice(0, 8)} is still streaming; it closes if its reply ends at a tool call`);
+          queryCtx.detachedFromSharedSession = true;
+          continue;
+        }
+        debug(`session_shutdown: closing a Claude Code query still in session ${sessionId.slice(0, 8)}`);
+        queryCtx.onRequestAbort?.();
+      }
       cancelScheduledSessionPersistence(ctx2.sessionManager);
       clearSession("session_shutdown");
       releaseProviderTokens("session_shutdown");
@@ -50699,6 +50900,7 @@ function index_default(pi2) {
     deleteSharedSessionLane(sessionId);
     deleteQueryLane(sessionId);
   });
+  pi2.on("input", (event, ctx2) => notePromptSource(ctx2.sessionManager.getSessionId(), event.source === "interactive" && ctx2.hasUI));
   pi2.on("before_agent_start", (_event, ctx2) => takeAgentNotice(ctx2.sessionManager.getSessionId()));
   pi2.on("message_end", (event, ctx2) => runInRequestLane(ctx2.sessionManager.getSessionId(), () => {
     const message = event.message;
@@ -50707,6 +50909,7 @@ function index_default(pi2) {
   pi2.on("session_compact", (_event, ctx2) => runInRequestLane(ctx2.sessionManager.getSessionId(), () => onPiHistoryReplaced("session_compact")));
   pi2.on("session_tree", (_event, ctx2) => runInRequestLane(ctx2.sessionManager.getSessionId(), () => onPiHistoryReplaced("session_tree")));
   applyProviderRegistration("load");
+  pi2[HOST_RESUME_MARKER] = true;
 }
 export {
   ALLOWED_RATE_LIMIT_WARNING_UTILIZATION_THRESHOLD,

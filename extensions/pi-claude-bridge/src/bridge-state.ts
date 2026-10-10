@@ -70,12 +70,6 @@ export interface SessionState {
 	// this — there's no concurrent CC writer during those events, so
 	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
-	// The Claude session holds Pi's later system messages as notes
-	// (system-notes.ts), and its system prompt is the one Pi's leading system
-	// messages render. Absent on a session created before notes: its queries
-	// send Pi's current system prompt until a rebuild that imports Pi's whole
-	// history, or a clean start, replaces it.
-	systemNotes?: boolean;
 }
 
 // Claude session state is scoped to Pi's provider `sessionId`. Parent and child

@@ -15,7 +15,6 @@ import { type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
 import { PROVIDER_ID, lastConversationIndex } from "./convert.ts";
 import { extractUserPrompt, extractUserPromptBlocks, slashLed } from "./user-prompt.ts";
-import { leadingSystemCount, systemPromptNotes, type SystemNotes } from "./system-notes.ts";
 import { buildModels, modelDisplayName } from "./models.ts";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.ts";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.ts";
@@ -56,11 +55,11 @@ import {
 import { BRIDGE_ACCOUNT_HOST } from "./account-host.ts";
 import { registerBridgeCommands } from "./bridge-commands.ts";
 import { consumeQuery, emitRateLimitEvent, type ClaudeAttemptFailure } from "./consume-query.ts";
-import { buildClaudeQueryOptions, outboundSystemPrompt } from "./query-options.ts";
+import { buildClaudeQueryOptions } from "./query-options.ts";
 import { sdkQuery as startSdkQuery } from "./sdk-query.ts";
 import { UserMessageLedger, type ClassifyOptions } from "./user-message-ledger.ts";
 import { currentRequestLaneId, runInRequestLane } from "./request-lane.ts";
-import { piSessionCwd, type SystemPromptOrigin } from "./pi-sessions.ts";
+import { piSessionCwd } from "./pi-sessions.ts";
 import { attachRequestTiming, startRequestTiming, type RequestTiming } from "./request-timing.ts";
 
 // Re-exports: the module decomposition must not change the entry's public
@@ -1264,15 +1263,10 @@ function streamRequestInLane(
 	const syncMessages: Context["messages"] = hostResumed
 		? [...context.messages, { role: "user", content: HOST_RESUMED_PROMPT, timestamp: Date.now() }]
 		: context.messages;
-	// The system prompt this request would send for a history, for the notes
-	// that carry Pi's later system messages (system-notes.ts).
-	const systemNotes = systemPromptNotes(syncMessages, (messages) => outboundSystemPrompt({
-		queryModel, bridgeConfig, systemPrompt: getCurrentSystemPrompt(messages), systemPromptOrigin: systemPromptOrigin(messages, options),
-	}).prompt);
 	const fresh: FreshQuery = {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages, systemNotes,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages,
 	};
 	// A forked rebuild awaits the SDK: by then the request may be cancelled, or
 	// a session shutdown may have ended its lane (a new context replaced this
@@ -1281,17 +1275,10 @@ function streamRequestInLane(
 	const synced = syncSharedSession(syncMessages, cwd, customToolNameToSdk, queryModel.id, accountScope, {
 		cancelled: requestEnded,
 		customToolNameToPi,
-		systemNotes,
 	});
 	if (!(synced instanceof Promise)) return startFreshQuery(fresh, synced);
 	awaitForkedRebuild(fresh, synced, requestEnded);
 	return stream;
-}
-
-/** Where the system prompt Pi's system messages in `messages` render came from. */
-function systemPromptOrigin(messages: Context["messages"], options: SimpleStreamOptions | undefined): SystemPromptOrigin {
-	const sections = getCurrentSystemMessage(messages)?.sections;
-	return { preamble: sections && (sections.preamble ?? ""), sessionId: options?.sessionId, cacheRetention: options?.cacheRetention };
 }
 
 /** A fresh request's setup, handed from streamRequestInLane to the code that
@@ -1324,7 +1311,6 @@ interface FreshQuery {
 	// What the Claude session is synced to: the context, and a host-resumed
 	// turn's prompt after it. The query's prompt is its tail from promptStart.
 	syncMessages: Context["messages"];
-	systemNotes: SystemNotes;
 }
 
 /**
@@ -1381,7 +1367,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages, systemNotes,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages,
 	} = fresh;
 	const { sessionId: resumeSessionId, promptStart } = syncResult;
 	timing?.noteSync(syncResult.sync, Boolean(resumeSessionId));
@@ -1400,14 +1386,8 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	// next idle-window foreign query.
 	const conversationFp = foreignContext ? undefined : conversationFingerprint(context.messages);
 	const promptMessages = syncMessages.slice(promptStart);
-	// A session that holds Pi's later system messages as notes keeps the
-	// system prompt Pi's leading system messages render; one created before
-	// notes gets Pi's current prompt and no notes (SessionState.systemNotes).
-	// A foreign one-shot imports no history, so it has nowhere to hold notes.
-	const noted = !foreignContext && (!resumeSessionId || getSharedSession()?.systemNotes === true);
-	const promptNotes = noted ? systemNotes : undefined;
-	const promptBlocks = extractUserPromptBlocks(promptMessages, promptNotes);
-	let promptText = extractUserPrompt(promptMessages, promptNotes) ?? "";
+	const promptBlocks = extractUserPromptBlocks(promptMessages);
+	let promptText = extractUserPrompt(promptMessages) ?? "";
 
 	// Guard: a prompt with no usable content means the last context message
 	// isn't a user message (or the batch was all-empty — joined batches turn ""
@@ -1448,15 +1428,19 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const mcpServers = servedTools ? { [MCP_SERVER_NAME]: servedTools.config } : undefined;
 	// Pure SDK query-option assembly — see buildClaudeQueryOptions for the
 	// connector, system-prompt, setting-source, effort, and env rationale.
-	const systemMessages = noted ? context.messages.slice(0, leadingSystemCount(context.messages)) : context.messages;
+	const systemSections = getCurrentSystemMessage(context.messages)?.sections;
 	const built = buildClaudeQueryOptions({
 		cwd,
 		requestedModel: model,
 		queryModel,
 		account,
 		bridgeConfig,
-		systemPrompt: getCurrentSystemPrompt(systemMessages),
-		systemPromptOrigin: systemPromptOrigin(systemMessages, options),
+		systemPrompt: getCurrentSystemPrompt(context.messages),
+		systemPromptOrigin: {
+			preamble: systemSections && (systemSections.preamble ?? ""),
+			sessionId: options?.sessionId,
+			cacheRetention: options?.cacheRetention,
+		},
 		reasoning: options?.reasoning,
 		resumeSessionId,
 		mcpServers,
@@ -1513,7 +1497,6 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	};
 	const persistSession = (next: SessionState | null): void => {
 		if (foreignContext || abortCtx.detachedFromSharedSession) return;
-		if (next && noted) next = { ...next, systemNotes: true };
 		const restartPending = Boolean(abortCtx.restartRequest);
 		let replaced = next;
 		// A mid-query user message the ledger could not identify is owned by

@@ -13,7 +13,6 @@ import { forkNativePrefix, planNativePrefix, type ForkedPrefix, type NativePrefi
 import { stepEnd, stepStart, type SyncTiming } from "./request-timing.ts";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.ts";
 import { INTERRUPTED_MARKER, promptRunStart } from "./user-prompt.ts";
-import type { SystemNotes } from "./system-notes.ts";
 import {
 	findUnpairedToolUses,
 	insertLostToolResultPlaceholders,
@@ -247,7 +246,6 @@ export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?
 			...(REBUILD_MARKS.includes(persisted.rebuildReason as RebuildMark) ? { rebuildReason: persisted.rebuildReason } : {}),
 		} : {}),
 		...(persisted.forceRotate === true ? { forceRotate: true } : {}),
-		...(persisted.systemNotes === true ? { systemNotes: true } : {}),
 		...(accountProfileId ? { accountProfileId, claudeConfigDir } : {}),
 	});
 	debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}, account=${accountProfileId ?? "default"}`);
@@ -350,9 +348,8 @@ function convertAndImportMessages(
 	messages: Context["messages"],
 	customToolNameToSdk?: Map<string, string>,
 	cwd?: string,
-	systemNotes?: SystemNotes,
 ): void {
-	const { anthropicMessages, sanitizedIds, notedTurns } = convertPiMessages(messages, customToolNameToSdk, { noteUnreplayableTurns: true, systemNotes });
+	const { anthropicMessages, sanitizedIds, notedTurns } = convertPiMessages(messages, customToolNameToSdk, { noteUnreplayableTurns: true });
 	if (notedTurns.length > 0) {
 		const calls = notedTurns.flatMap((turn) => turn.calls);
 		debug(`convertAndImportMessages: ${notedTurns.length} trailing Claude turn(s) with unsigned thinking imported as a note, carrying ${calls.length} tool call(s):`, calls.map((call) => `${call.name} [${call.id}]`).join(", "));
@@ -435,11 +432,6 @@ export interface SyncOptions {
 	// resolveMcpTools), the one its stream names Pi's tool calls with. A
 	// forked rebuild compares Claude Code's tool calls to Pi's through it.
 	customToolNameToPi?: Map<string, string>;
-	// The notes for Pi's later system messages (system-notes.ts). A rebuild
-	// that imports Pi's whole history writes them where Pi holds those
-	// messages and marks the new session as holding them (`systemNotes`); a
-	// fork does so only from a session that already held them.
-	systemNotes?: SystemNotes;
 }
 
 export interface IncrementalPromptBatchPlan {
@@ -732,7 +724,7 @@ export function syncSharedSession(
 		: sharedSession?.needsRebuild ? "needs-rebuild"
 		: digestCause ?? "missed-messages";
 	if (previousSessionId !== undefined && options.fork !== false) {
-		const plan = planNativePrefix(priorMessages, previousSessionId, cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi, sharedSession?.systemNotes ? options.systemNotes : undefined);
+		const plan = planNativePrefix(priorMessages, previousSessionId, cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi);
 		if ("prefix" in plan) {
 			return rebuildFromNativePrefix(plan.prefix, {
 				messages, cwd, customToolNameToSdk, modelId, account, options,
@@ -752,7 +744,7 @@ export function syncSharedSession(
 		...(preserveId ? { sessionId: previousSessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
-	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd, options.systemNotes);
+	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
 	endOnAssistant(session);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd, claudeDir);
@@ -767,8 +759,6 @@ export function syncSharedSession(
 		...(incomingFingerprint ? { conversationFingerprint: incomingFingerprint } : {}),
 		...(accountProfileId ? { accountProfileId } : {}),
 		...(scopeConfigDir ? { claudeConfigDir: scopeConfigDir } : {}),
-		// Even an empty map marks the session: its next prompt carries notes.
-		...(options.systemNotes ? { systemNotes: true } : {}),
 	});
 	if (replacedSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.messages.length} records`);
@@ -892,8 +882,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		sessionId: forked.sessionId,
 		...(c.modelId ? { model: c.modelId } : {}),
 	});
-	const systemNotes = c.sharedSession.systemNotes ? c.options.systemNotes : undefined;
-	if (tail.length > 0) convertAndImportMessages(session, tail, c.customToolNameToSdk, c.cwd, systemNotes);
+	if (tail.length > 0) convertAndImportMessages(session, tail, c.customToolNameToSdk, c.cwd);
 	endOnAssistant(session, forked.entries as JsonlRecord[]);
 	// The import starts a chain of its own. It must hang off the fork's leaf,
 	// which is often an attachment: chained from the last message instead, the
@@ -923,7 +912,6 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		...(c.incomingFingerprint ? { conversationFingerprint: c.incomingFingerprint } : {}),
 		...(accountProfileId ? { accountProfileId } : {}),
 		...(scopeConfigDir ? { claudeConfigDir: scopeConfigDir } : {}),
-		...(systemNotes ? { systemNotes: true } : {}),
 	});
 	const newId = forked.sessionId.slice(0, 8);
 	const appended = priorMessages.length - prefix.piCount;

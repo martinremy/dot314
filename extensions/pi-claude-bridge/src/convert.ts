@@ -5,7 +5,6 @@ import type { AssistantMessage, Message as PiMessage } from "@earendil-works/pi-
 import type { ContentBlock, Message as SessionMessage } from "cc-session-io";
 import { pascalCase } from "change-case";
 import { isChildExecutedTool } from "./connectors.ts";
-import type { SystemNotes } from "./system-notes.ts";
 
 export const PROVIDER_ID = "pi-claude";
 
@@ -261,7 +260,7 @@ function unreplayedTurnNote(msg: AssistantMessage, results: Map<string, PiMessag
 export function convertPiMessages(
 	messages: PiMessage[],
 	customToolNameToSdk?: Map<string, string>,
-	opts: { noteUnreplayableTurns?: boolean; systemNotes?: SystemNotes } = {},
+	opts: { noteUnreplayableTurns?: boolean } = {},
 ): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string>; notedTurns: Array<{ calls: Array<{ id: string; name: string }> }> } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
@@ -360,11 +359,6 @@ export function convertPiMessages(
 				blocks.push(toolResultToAnthropicBlock(toolMsg, sanitizedIds));
 			}
 			if (blocks.length > 0) anthropicMessages.push({ role: "user", content: blocks });
-		} else if (msg.role === "system") {
-			// The note a query would have sent for it (system-notes.ts), as a
-			// record of its own where Pi holds it.
-			const note = opts.systemNotes?.get(msg);
-			if (note) anthropicMessages.push({ role: "user", content: [{ type: "text", text: note }] });
 		}
 	}
 
