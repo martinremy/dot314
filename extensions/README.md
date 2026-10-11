@@ -257,11 +257,6 @@
   - Publishes JPEG, PNG, GIF, and WebP data to a configured static HTTPS directory and replaces repeated inline base64 in supported Anthropic and OpenAI provider requests with content-addressed URLs
   - Keeps ordinary base64 image data in Pi sessions and retries a failed Codex URL request once with inline image data
 
-- ◐ [`pi-codex-goal/`](pi-codex-goal/) ([README](pi-codex-goal/README.md)) (upstream: [fitchmultz/pi-codex-goal](https://github.com/fitchmultz/pi-codex-goal))
-  - Adds durable `/goal` tracking, model-callable goal tools, budget and elapsed-time accounting, automatic continuation, compaction recovery, and provider-limit recovery
-  - This version schedules mid-run compaction at the next `context` event before a provider request after a qualifying turn that uses a tool, so Pi persists the complete tool call and result before compaction changes provider context
-  - Updates the smoke test that exercises Pi's SDK runtime to use the `ModelRuntime` API
-
 - ◐ [`pi-queue-steer/`](pi-queue-steer/) ([README](pi-queue-steer/README.md)) (upstream: [tmustier/pi-queue-steer](https://github.com/tmustier/pi-queue-steer))
   - Shows independent, editable steering and follow-up queues while preserving Pi's native delivery timing
   - Adds `/followup <message>`, `/steer <message>` while editing a follow-up, and symmetric `Option+Enter` conversion between queue lanes

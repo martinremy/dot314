@@ -115,7 +115,6 @@ See [extensions/README.md](extensions/README.md) for more detailed descriptions.
 | ● | `model-sysprompt-appendix/` | [`pi-model-sysprompt-appendix`](https://www.npmjs.com/package/pi-model-sysprompt-appendix) | Per-model system prompt additions |
 | ● | `move-session.ts` | [`pi-move-session`](https://www.npmjs.com/package/pi-move-session) | Move current active session to a new cwd |
 | ◐ | [`pi-claude-bridge/`](extensions/pi-claude-bridge/README.md) | | Claude Agent SDK bridge for ToS-compliant Claude subscriptions usage in Pi |
-| ◐ | `pi-codex-goal/` | | Durable Codex-style goal tracking and continuation |
 | ◐ | `pi-queue-steer/` | | Editable steering and follow-up queues with RepoPrompt-aware interruption events |
 | ● | `protect-paths/` | | Blocks `.git/` access and `node_modules/` writes (reads allowed), brew installs, and asks before deletes or piped shells. Pair with [`@aliou/pi-guardrails`](https://github.com/aliou/pi-guardrails) for `.env` protection |
 | ● | `repoprompt-mcp/` | [`pi-repoprompt-mcp`](https://www.npmjs.com/package/pi-repoprompt-mcp) | RepoPrompt MCP proxy with adaptive diff rendering, collapsed outputs, read-cache, and branch-safe binding |
@@ -169,6 +168,7 @@ These other extensions have also improved my QoL in Pi, so I recommend checking 
 | [greprip](https://github.com/kaofelix/greprip) (kaofelix) | Transparent interception of `grep`/`find` commands, translating them to `rg`/`fd` for speed | `uv tool install git+https://github.com/kaofelix/greprip` + [shell config](https://github.com/kaofelix/greprip#2-configure-pi) |
 | [loop](https://github.com/mitsuhiko/agent-stuff/blob/main/pi-extensions/loop.ts) (mitsuhiko) | `/loop` starts a follow-up loop with a breakout condition | Copy to `~/.pi/agent/extensions/` |
 | [pi-codex-conversion](https://github.com/IgorWarzocha/howaboua-pi-stuff/tree/main/packages/pi-codex-conversion) (IgorWarzocha) | Codex-shaped tools for openai-codex models, plus Responses compaction, model verbosity controls, cached transport, and other niceties | `pi install npm:@howaboua/pi-codex-conversion` |
+| [pi-codex-goal](https://github.com/fitchmultz/pi-codex-goal) (fitchmultz) | Codex-style `/goal` tracking with model-callable goal tools, token and time accounting, and automatic continuation until the goal is complete | `pi install npm:pi-codex-goal` |
 | [pi-computer-use](https://github.com/injaneity/pi-computer-use) (injaneity) | Desktop app observation and interaction tools for macOS, Windows, and Linux | `pi install npm:@injaneity/pi-computer-use` |
 | [pi-guardrails](https://github.com/aliou/pi-guardrails) (aliou) | `.env` file protection + AST-based dangerous command gates | `pi install npm:@aliou/pi-guardrails` |
 | [pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) (HazAT) | Spawn, orchestrate, and manage async subagent sessions in multiplexer cmux panes; main agent keeps working while subagents run in the background | `pi install git:github.com/HazAT/pi-interactive-subagents` |

@@ -60,13 +60,6 @@ text. This file provides a consolidated overview.
 - **Used in:**
   - `extensions/image-url-broker/` (◐ independent Pi extension informed by the blob broker's image-handling design)
 
-### fitchmultz/pi-codex-goal
-- **URL:** https://github.com/fitchmultz/pi-codex-goal
-- **License:** MIT
-- **Copyright:** © 2026 Mitch Fultz
-- **Used in:**
-  - `extensions/pi-codex-goal/` (◐ modified — defers mid-run compaction to the next `context` event after a complete tool turn and updates the smoke test for Pi's SDK runtime)
-
 ### vanillagreencom/kendex
 - **URL:** https://github.com/vanillagreencom/kendex/tree/main/pi-extensions/pi-claude-bridge
 - **License:** MIT
