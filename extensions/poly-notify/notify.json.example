@@ -4,6 +4,7 @@
   "sound": "silent",
   "showPopup": false,
   "interactiveOnly": true,
+  "waitForAll": false,
   "sounds": [
     {
       "alias": "silent"

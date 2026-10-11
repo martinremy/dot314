@@ -1,7 +1,7 @@
 {
   "name": "pi-poly-notify",
-  "version": "0.1.3",
-  "description": "Highly configurable desktop/sound/Pushover notifications when Pi agent turn finishes and took longer than a definable threshold",
+  "version": "0.1.4",
+  "description": "Highly configurable desktop/sound/Pushover notifications when a long Pi agent run finishes or waits on a dialog, with an optional mode that waits until all parallel Pi sessions have stopped",
   "keywords": [
     "pi-package",
     "pi",
@@ -40,6 +40,10 @@
       {
         "from": "../../extensions/poly-notify/index.ts",
         "to": "extensions/poly-notify/index.ts"
+      },
+      {
+        "from": "../../extensions/poly-notify/working-sessions.ts",
+        "to": "extensions/poly-notify/working-sessions.ts"
       },
       {
         "from": "../../extensions/poly-notify/notify.json.example",

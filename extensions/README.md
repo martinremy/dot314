@@ -154,7 +154,8 @@
   - Desktop / sound / Pushover notifications (e.g. to smart watch) when an agent run that exceeds a duration threshold finishes or stops at a dialog (e.g. a permission prompt); cancelled runs don't notify
   - Sound aliases include `random` (randomly picks from configured list of sounds)
   - Volume modes: `constant` or `timeScaled`
-  - `/notify` interactive menu, plus quick toggles (`/notify on|off|popup|pushover|volume|<seconds>|<sound>`)
+  - Optional wait-for-all mode (`/notify all`): with several Pi sessions running in parallel, only the last one to finish notifies
+  - `/notify` interactive menu, plus quick toggles (`/notify on|off|popup|pushover|volume|all|<seconds>|<sound>`)
   - Config file lives at `poly-notify/notify.json` (example: [`poly-notify/notify.json.example`](poly-notify/notify.json.example))
 
 <p align="center">

@@ -11,6 +11,8 @@
  * - Notifies once Pi has fully settled (after retries, compaction, and queued follow-ups)
  * - Skips runs you cancel (e.g. with Escape)
  * - Notifies when a run waits on a dialog, such as a permission prompt
+ * - Optional wait-for-all mode: a finished run notifies only once no other Pi session on this
+ *   machine is still working, and the duration threshold applies to the whole busy stretch
  * - Configurable sounds: system sounds, custom paths, silent, or random
  * - "silent" reserved alias: no sound plays (popup only if enabled)
  * - "random" reserved alias: randomly picks from all sounds with paths
@@ -34,6 +36,7 @@
  * - /notify popup - toggle popup on/off
  * - /notify pushover - toggle Pushover on/off
  * - /notify volume - toggle between constant/timeScaled
+ * - /notify all - toggle wait-for-all mode
  * - /notify 10 - set minimum duration to 10 seconds
  * - /notify glass - set sound to Glass (case-insensitive alias match)
  * - /notify silent - disable sound (popup only)
@@ -41,11 +44,12 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, type KeyId } from "@earendil-works/pi-tui";
+import { hasWorkingSessions, joinWorkingSessions, type WorkingSession } from "./working-sessions.ts";
 
 // =============================================================================
 // Configuration
@@ -82,6 +86,8 @@ interface NotifyConfig {
 	sound: string; // alias reference
 	showPopup: boolean;
 	interactiveOnly: boolean;
+	/** Notify about a finished run only once no other Pi session on this machine is working. */
+	waitForAll: boolean;
 	sounds: SoundEntry[];
 	volume: VolumeConfig;
 	pushover: PushoverConfig;
@@ -105,6 +111,7 @@ const DEFAULT_CONFIG: NotifyConfig = {
 	sound: "silent",
 	showPopup: false,
 	interactiveOnly: true,
+	waitForAll: false,
 	sounds: [
 		{ alias: "silent" },
 		{ alias: "random" },
@@ -288,11 +295,14 @@ function sendPushover(config: NotifyConfig, title: string, message: string): voi
 function notify(title: string, body: string, config: NotifyConfig, elapsedSeconds: number): void {
 	// Show popup notification if enabled
 	if (config.showPopup) {
-		try {
-			execSync(`osascript -e 'display notification "${body}" with title "${title}"'`);
-		} catch {
-			// Silently fail
-		}
+		// Title and body travel as script arguments, so their text never becomes AppleScript or shell code.
+		const child = spawn(
+			"osascript",
+			["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, body],
+			{ detached: true, stdio: "ignore" }
+		);
+		child.on("error", () => {}); // Silently fail, e.g. where osascript is missing
+		child.unref();
 	}
 
 	// Play sound with calculated volume
@@ -311,6 +321,7 @@ function notify(title: string, body: string, config: NotifyConfig, elapsedSecond
 export default function notifyExtension(pi: ExtensionAPI) {
 	let config: NotifyConfig;
 	let agentStartTime: number | null = null;
+	let workingSession: WorkingSession | null = null;
 	let isInteractive: boolean = false;
 
 	// =========================================================================
@@ -325,9 +336,10 @@ export default function notifyExtension(pi: ExtensionAPI) {
 			const soundIndicator = lowerSound === "silent" ? "" : "♫";
 			const popupIndicator = config.showPopup ? "↑" : "";
 			const pushoverIndicator = config.pushover.enabled ? "⚡︎" : "";
+			const waitForAllIndicator = config.waitForAll ? "∀" : "";
 			ctx.ui.setStatus(
 				"notify",
-				ctx.ui.theme.fg("success", `${soundIndicator}${popupIndicator}${pushoverIndicator} ${config.minDurationSeconds}s`)
+				ctx.ui.theme.fg("success", `${soundIndicator}${popupIndicator}${pushoverIndicator}${waitForAllIndicator} ${config.minDurationSeconds}s`)
 			);
 		} else {
 			ctx.ui.setStatus("notify", ctx.ui.theme.fg("muted", ""));
@@ -375,6 +387,22 @@ export default function notifyExtension(pi: ExtensionAPI) {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
 				config.pushover.enabled ? "Pushover notifications enabled" : "Pushover notifications disabled",
+				"info"
+			);
+		}
+
+		updateStatus(ctx);
+	}
+
+	function toggleWaitForAll(ctx: ExtensionContext): void {
+		config.waitForAll = !config.waitForAll;
+		saveConfig(config);
+
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				config.waitForAll
+					? "Finished runs notify only once every Pi session on this machine has stopped"
+					: "Every finished run notifies",
 				"info"
 			);
 		}
@@ -454,6 +482,12 @@ export default function notifyExtension(pi: ExtensionAPI) {
 					return;
 				}
 
+				// /notify all
+				if (arg === "all") {
+					toggleWaitForAll(ctx);
+					return;
+				}
+
 				// /notify <number> - set duration
 				const num = parseInt(arg, 10);
 				if (!isNaN(num) && num >= 0) {
@@ -479,13 +513,14 @@ export default function notifyExtension(pi: ExtensionAPI) {
 
 				// Unknown arg - show help
 				ctx.ui.notify(
-					`Unknown argument: ${args}\nUse: on, off, popup, pushover, volume, <seconds>, or <sound alias>`,
+					`Unknown argument: ${args}\nUse: on, off, popup, pushover, volume, all, <seconds>, or <sound alias>`,
 					"warning"
 				);
 				return;
 			}
 
 			// No args - show interactive menu
+			const waitForAllItem = `${config.waitForAll ? "Disable" : "Enable"} waiting for all Pi sessions`;
 			const menuItems = [
 				`${config.enabled ? "Disable" : "Enable"} notifications`,
 				`${config.showPopup ? "Disable" : "Enable"} popup`,
@@ -495,6 +530,7 @@ export default function notifyExtension(pi: ExtensionAPI) {
 				...(config.volume.mode === "timeScaled" ? [`Set min volume (current: ${config.volume.min})`] : []),
 				`Set duration threshold (current: ${config.minDurationSeconds}s)`,
 				`Change sound (current: ${config.sound})`,
+				waitForAllItem,
 				"Test notification",
 			];
 
@@ -597,8 +633,13 @@ export default function notifyExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (choice === waitForAllItem) {
+				toggleWaitForAll(ctx);
+				return;
+			}
+
 			// Test notification
-			const testIndex = config.volume.mode === "timeScaled" ? 8 : 7;
+			const testIndex = config.volume.mode === "timeScaled" ? 9 : 8;
 			if (choice === menuItems[testIndex]) {
 				// Test at 4x threshold to demonstrate max volume
 				notify("𝞹", "⟳", config, config.minDurationSeconds * 4);
@@ -622,23 +663,44 @@ export default function notifyExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_start", async () => {
 		// Retries and continuations start new agent loops within the same run.
-		agentStartTime ??= Date.now();
+		if (agentStartTime !== null) return;
+		agentStartTime = Date.now();
+		// Every session reports its runs, whatever its own settings, so that sessions
+		// waiting for all others (now or after a toggle elsewhere) can see it.
+		workingSession = await joinWorkingSessions(agentStartTime);
 	});
 
 	// Not agent_end: Pi can still retry, compact, or run queued follow-ups after it.
 	pi.on("agent_settled", async (event) => {
 		const startTime = agentStartTime;
+		const session = workingSession;
 		agentStartTime = null;
-		if (startTime === null || event.aborted) return;
+		workingSession = null;
+		await session?.leave();
+		if (startTime === null || session === null || event.aborted) return;
 
-		notifyIfRunLongEnough(startTime, "⟳");
+		// Re-read so a mode toggled in another session applies here too.
+		config = loadConfig();
+		if (!config.waitForAll) {
+			notifyIfRunLongEnough(startTime, "⟳");
+			return;
+		}
+		if (await hasWorkingSessions()) return;
+		notifyIfRunLongEnough(session.groupStartMs, "⟳ all");
 	});
 
-	// A dialog opened mid-run blocks the agent until you answer it.
+	// A dialog opened mid-run blocks the agent until you answer it, so it notifies in every mode.
 	pi.on("ui_prompt_start", async () => {
 		if (agentStartTime === null) return;
 
+		config = loadConfig();
 		notifyIfRunLongEnough(agentStartTime, "?");
+	});
+
+	pi.on("session_shutdown", async () => {
+		agentStartTime = null;
+		await workingSession?.leave();
+		workingSession = null;
 	});
 
 	// =========================================================================

@@ -53,8 +53,15 @@ Quick forms:
 - `/notify popup` (toggle popup)
 - `/notify pushover` (toggle Pushover)
 - `/notify volume` (toggle constant ↔ timeScaled)
+- `/notify all` (toggle waiting for all Pi sessions)
 - `/notify <seconds>` (set minimum duration threshold)
 - `/notify <sound-alias>` (set sound)
+
+## Waiting for all Pi sessions
+
+If you run several Pi sessions in parallel, set `"waitForAll": true` in `notify.json` or run `/notify all`. A finished run then notifies only when no other Pi session on this machine is still working, so a single ping tells you everything has stopped. The duration threshold applies to the whole stretch during which at least one session was working, so a short final run still notifies after a long busy period. A dialog that stops a run still notifies right away, because that session can't finish until you answer. The footer shows `∀` while this mode is on, and the setting applies to every session as soon as you change it.
+
+Sessions find each other through small sockets in a per-user folder under your temporary directory. A session's socket exists only while it is working, and sockets left behind by a crashed session are removed the next time another session checks.
 
 ## Notes
 
