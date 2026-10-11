@@ -117,7 +117,7 @@ See [extensions/README.md](extensions/README.md) for more detailed descriptions.
 | ◐ | [`pi-claude-bridge/`](extensions/pi-claude-bridge/README.md) | | Claude Agent SDK bridge for ToS-compliant Claude subscriptions usage in Pi |
 | ◐ | `pi-codex-goal/` | | Durable Codex-style goal tracking and continuation |
 | ◐ | `pi-queue-steer/` | | Editable steering and follow-up queues with RepoPrompt-aware interruption events |
-| ● | `protect-paths/` | | Directory protection with configurable trusted read paths, brew prevention, and command gates. Pair with [`@aliou/pi-guardrails`](https://github.com/aliou/pi-guardrails) for `.env` protection |
+| ● | `protect-paths/` | | Blocks `.git/` access and `node_modules/` writes (reads allowed), brew installs, and asks before deletes or piped shells. Pair with [`@aliou/pi-guardrails`](https://github.com/aliou/pi-guardrails) for `.env` protection |
 | ● | `repoprompt-mcp/` | [`pi-repoprompt-mcp`](https://www.npmjs.com/package/pi-repoprompt-mcp) | RepoPrompt MCP proxy with adaptive diff rendering, collapsed outputs, read-cache, and branch-safe binding |
 | ● | `reverse-thinking.ts` | | Backward thinking-level cycling on `shift+alt+tab` |
 | ◐ | `sandbox/` | | OS-level sandboxing |

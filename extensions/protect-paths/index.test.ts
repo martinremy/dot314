@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test, { afterEach } from "node:test";
-import { fileURLToPath } from "node:url";
+import test from "node:test";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import protectPaths, { loadProtectPathsConfig } from "./index.ts";
+import protectPaths from "./index.ts";
 
 type ToolCallResult = { block: true; reason?: string } | undefined;
 type ToolCallHandler = (
@@ -21,26 +17,11 @@ type ToolCallHandler = (
     },
 ) => Promise<ToolCallResult>;
 
-const ALLOWED_PI_ROOT = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent";
-const ALLOWED_PI_PATH = `${ALLOWED_PI_ROOT}/node_modules/@earendil-works/pi-ai/dist/providers`;
-const tempDirectories: string[] = [];
+const DEPENDENCY_PATH = "/tmp/project/node_modules/package";
 
-afterEach(() => {
-    for (const directory of tempDirectories.splice(0)) {
-        rmSync(directory, { recursive: true, force: true });
-    }
-});
+type ToolInput = { path: string } | { command: string };
 
-function createConfig(trustedReadPaths: string[]): string {
-    const directory = mkdtempSync(join(tmpdir(), "protect-paths-"));
-    tempDirectories.push(directory);
-
-    const configPath = join(directory, "config.json");
-    writeFileSync(configPath, JSON.stringify({ trustedReadPaths }));
-    return configPath;
-}
-
-function createBashRunner(trustedReadPaths = [ALLOWED_PI_ROOT]): (command: string) => Promise<ToolCallResult> {
+function createToolRunner(): (toolName: string, input: ToolInput) => Promise<ToolCallResult> {
     const handlers: ToolCallHandler[] = [];
     const pi = {
         on(eventName: string, handler: ToolCallHandler) {
@@ -48,10 +29,10 @@ function createBashRunner(trustedReadPaths = [ALLOWED_PI_ROOT]): (command: strin
         },
     } as unknown as ExtensionAPI;
 
-    protectPaths(pi, { configPath: createConfig(trustedReadPaths) });
+    protectPaths(pi);
 
-    return async (command: string) => {
-        const event = { toolName: "bash", input: { command } };
+    return async (toolName, input) => {
+        const event = { toolName, input };
         const context = {
             hasUI: false,
             ui: {
@@ -69,57 +50,54 @@ function createBashRunner(trustedReadPaths = [ALLOWED_PI_ROOT]): (command: strin
     };
 }
 
-test("loadProtectPathsConfig returns no trusted paths when config is absent", () => {
-    const directory = mkdtempSync(join(tmpdir(), "protect-paths-"));
-    tempDirectories.push(directory);
+function createBashRunner(): (command: string) => Promise<ToolCallResult> {
+    const runTool = createToolRunner();
+    return (command) => runTool("bash", { command });
+}
 
-    assert.deepEqual(loadProtectPathsConfig(join(directory, "config.json")), { trustedReadPaths: [] });
+test("read tools can inspect node_modules but write tools cannot", async () => {
+    const runTool = createToolRunner();
+
+    assert.equal(await runTool("read", { path: `${DEPENDENCY_PATH}/index.js` }), undefined);
+    assert.equal((await runTool("edit", { path: `${DEPENDENCY_PATH}/index.js` }))?.block, true);
 });
 
-test("loadProtectPathsConfig loads the checked-in example", () => {
-    const examplePath = fileURLToPath(new URL("config.json.example", import.meta.url));
-    const config = loadProtectPathsConfig(examplePath);
-
-    assert.ok(config.trustedReadPaths.length > 0);
-    assert.ok(config.trustedReadPaths.every((path) => path.startsWith("/")));
-});
-
-test("loadProtectPathsConfig rejects malformed configuration", () => {
-    const directory = mkdtempSync(join(tmpdir(), "protect-paths-"));
-    tempDirectories.push(directory);
-
-    const configPath = join(directory, "config.json");
-    writeFileSync(configPath, JSON.stringify({ trustedReadPaths: ["relative/path"] }));
-
-    assert.throws(() => loadProtectPathsConfig(configPath), /trustedReadPaths must contain absolute paths/);
-});
-
-test("trusted read-only Bash commands can inspect configured dependencies", async () => {
+test("read-only Bash commands can reference node_modules anywhere", async () => {
     const runBash = createBashRunner();
-    const result = await runBash(
-        `ls ${ALLOWED_PI_PATH} 2>/dev/null || find ${ALLOWED_PI_ROOT} -name "openai-completions*"`,
-    );
+    const commands = [
+        "ls -R | grep -v node_modules | head -40; rg -n -i orca --glob '!node_modules' .",
+        'find . -maxdepth 3 -iname "*guard*" -not -path "*/node_modules/*"',
+        "ls /tmp/project/node_modules/package/index.js",
+    ];
 
-    assert.equal(result, undefined);
+    for (const command of commands) {
+        assert.equal(await runBash(command), undefined, command);
+    }
 });
 
-test("untrusted node_modules reads remain blocked", async () => {
+test("non-read-only node_modules commands remain blocked", async () => {
     const runBash = createBashRunner();
-    const result = await runBash("ls /tmp/project/node_modules/package/index.js");
+    const commands = [
+        `cp patch.js ${DEPENDENCY_PATH}/index.js`,
+        `rg --pre ${DEPENDENCY_PATH}/bin/run pattern .`,
+        `rg --pre=${DEPENDENCY_PATH}/bin/run pattern .`,
+    ];
+
+    for (const command of commands) {
+        assert.equal((await runBash(command))?.block, true, command);
+    }
+});
+
+test("output redirection into node_modules remains blocked", async () => {
+    const runBash = createBashRunner();
+    const result = await runBash(`echo changed > ${DEPENDENCY_PATH}/generated.js`);
 
     assert.equal(result?.block, true);
 });
 
-test("output redirection into a trusted node_modules path remains blocked", async () => {
+test("mutating find actions in node_modules remain blocked", async () => {
     const runBash = createBashRunner();
-    const result = await runBash(`echo changed > ${ALLOWED_PI_PATH}/generated.js`);
-
-    assert.equal(result?.block, true);
-});
-
-test("mutating find actions in a trusted node_modules path remain blocked", async () => {
-    const runBash = createBashRunner();
-    const result = await runBash(`find ${ALLOWED_PI_PATH} -delete`);
+    const result = await runBash(`find ${DEPENDENCY_PATH} -delete`);
 
     assert.equal(result?.block, true);
 });

@@ -6,7 +6,8 @@
  *
  * This extension protects:
  * - .git/ directory contents (prevents repository corruption)
- * - node_modules/ directory contents (use package manager instead)
+ * - node_modules/ directory contents against writes (use package manager instead);
+ *   read tools and read-only bash commands (ls, grep, rg, find) may inspect them
  * - Homebrew install/upgrade commands (remind to use project package manager)
  * - Broad delete commands (rm/rmdir/unlink)
  * - Piped shell execution (e.g. `curl ... | sh`)
@@ -19,9 +20,7 @@
  * - If unavailable, this extension falls back to best-effort regex checks
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -76,11 +75,6 @@ type BashInvocation = {
 type BashAnalysis = {
     parseError?: string;
     invocations: BashInvocation[];
-};
-
-type BashPathReference = {
-    path: string;
-    allowTrustedRead: boolean;
 };
 
 const WRAPPER_COMMANDS = new Set(["command", "builtin", "exec", "nohup"]);
@@ -307,66 +301,6 @@ function analyzeBashScript(command: string): BashAnalysis {
     }
 }
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
-export interface ProtectPathsConfig {
-    trustedReadPaths: string[];
-}
-
-interface ProtectPathsOptions {
-    configPath?: string;
-}
-
-const DEFAULT_CONFIG: ProtectPathsConfig = {
-    trustedReadPaths: [],
-};
-
-const DEFAULT_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), "config.json");
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function loadProtectPathsConfig(configPath = DEFAULT_CONFIG_PATH): ProtectPathsConfig {
-    if (!existsSync(configPath)) return DEFAULT_CONFIG;
-
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(readFileSync(configPath, "utf8"));
-    } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Invalid protect-paths config at ${configPath}: ${message}`);
-    }
-
-    if (!isRecord(parsed)) {
-        throw new Error(`Invalid protect-paths config at ${configPath}: expected an object`);
-    }
-
-    const unsupportedKeys = Object.keys(parsed).filter((key) => key !== "trustedReadPaths");
-    if (unsupportedKeys.length > 0) {
-        throw new Error(
-            `Invalid protect-paths config at ${configPath}: unsupported keys ${unsupportedKeys.join(", ")}`,
-        );
-    }
-
-    if (!Array.isArray(parsed.trustedReadPaths) || parsed.trustedReadPaths.length === 0) {
-        throw new Error(`Invalid protect-paths config at ${configPath}: trustedReadPaths must be a non-empty array`);
-    }
-
-    const invalidPath = parsed.trustedReadPaths.find(
-        (path) => typeof path !== "string" || path.length === 0 || !isAbsolute(path),
-    );
-    if (invalidPath !== undefined) {
-        throw new Error(`Invalid protect-paths config at ${configPath}: trustedReadPaths must contain absolute paths`);
-    }
-
-    return {
-        trustedReadPaths: parsed.trustedReadPaths.map((path) => resolve(path as string)),
-    };
-}
-
 const SHELL_EXECUTABLES = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
 const DELETE_EXECUTABLES = new Set(["rm", "rmdir", "unlink"]);
 const BREW_ACTIONS = new Set(["install", "bundle", "upgrade", "reinstall"]);
@@ -391,10 +325,10 @@ const BREW_INSTALL_PATTERNS = [
     /\bbrew\s+reinstall\b/,
 ];
 
-// Tools that can read files from configured trusted paths
+// Tools that may read node_modules
 const READ_TOOLS = ["read", "grep", "find", "ls"];
 
-// Tools that can write or modify files never receive trusted-path access
+// Tools that may never touch node_modules
 const WRITE_TOOLS = ["write", "edit"];
 
 // ============================================================================
@@ -404,32 +338,9 @@ const WRITE_TOOLS = ["write", "edit"];
 const GIT_DIR_PATTERN = /(?:^|[/\\])\.git(?:[/\\]|$)/;
 const NODE_MODULES_PATTERN = /(?:^|[/\\])node_modules(?:[/\\]|$)/;
 
-function isTrustedReadPath(filePath: string, trustedReadPaths: string[]): boolean {
+function isProtectedDirectory(filePath: string, allowNodeModules: boolean): boolean {
     const resolved = resolve(filePath);
-    return trustedReadPaths.some(
-        (trustedPath) => resolved === trustedPath || resolved.startsWith(`${trustedPath}${sep}`),
-    );
-}
-
-function isProtectedDirectory(
-    filePath: string,
-    allowTrustedRead: boolean,
-    trustedReadPaths: string[],
-): boolean {
-    const resolved = resolve(filePath);
-
-    if (GIT_DIR_PATTERN.test(resolved)) {
-        return true;
-    }
-
-    if (NODE_MODULES_PATTERN.test(resolved)) {
-        if (allowTrustedRead && isTrustedReadPath(resolved, trustedReadPaths)) {
-            return false;
-        }
-        return true;
-    }
-
-    return false;
+    return GIT_DIR_PATTERN.test(resolved) || (!allowNodeModules && NODE_MODULES_PATTERN.test(resolved));
 }
 
 function getProtectionReason(filePath: string): string {
@@ -448,57 +359,58 @@ function extractPathFromInput(input: Record<string, unknown>): string {
 }
 
 function invocationReadsPathsOnly(invocation: BashInvocation): boolean {
-    if (!READ_ONLY_BASH_COMMANDS.has(invocation.effectiveCommandName)) return false;
-    if (invocation.effectiveCommandName !== "find") return true;
-
-    return !invocation.effectiveArgs.some((arg) => MUTATING_FIND_ACTIONS.has(arg.toLowerCase()));
+    switch (invocation.effectiveCommandName) {
+        case "find":
+            return !invocation.effectiveArgs.some((arg) => MUTATING_FIND_ACTIONS.has(arg.toLowerCase()));
+        case "rg":
+            // --pre runs an arbitrary program on every searched file
+            return !invocation.effectiveArgs.some((arg) => arg === "--pre" || arg.startsWith("--pre="));
+        default:
+            return READ_ONLY_BASH_COMMANDS.has(invocation.effectiveCommandName);
+    }
 }
 
-function appendProtectedPathReference(
-    refs: BashPathReference[],
-    seen: Set<string>,
-    path: string,
-    allowTrustedRead: boolean,
-): void {
-    if (!GIT_DIR_PATTERN.test(path) && !NODE_MODULES_PATTERN.test(path)) return;
-
-    const key = `${allowTrustedRead ? "read" : "protected"}:${path}`;
-    if (seen.has(key)) return;
-
-    seen.add(key);
-    refs.push({ path, allowTrustedRead });
+function appendProtectedPathReference(refs: Set<string>, path: string, allowNodeModules: boolean): void {
+    if (GIT_DIR_PATTERN.test(path) || (!allowNodeModules && NODE_MODULES_PATTERN.test(path))) {
+        refs.add(path);
+    }
 }
 
-function extractProtectedDirRefsFromCommand(command: string): BashPathReference[] {
-    const refs: BashPathReference[] = [];
-    const seen = new Set<string>();
+// Parser failures stay fail-closed because command context is unavailable
+function extractProtectedDirRefsFromUnparsedCommand(command: string): Set<string> {
+    const refs = new Set<string>();
 
+    const gitDirRegex =
+        /(?:^|\s|[<>|;&"'`])([^\s<>|;&"'`]*\.git[/\\][^\s<>|;&"'`]*)((?:\s|$|[<>|;&"'`]))/gi;
+    for (const match of command.matchAll(gitDirRegex)) {
+        if (match[1]) appendProtectedPathReference(refs, match[1], false);
+    }
+
+    const nodeModulesRegex =
+        /(?:^|\s|[<>|;&"'`])([^\s<>|;&"'`]*node_modules[/\\][^\s<>|;&"'`]*)((?:\s|$|[<>|;&"'`]))/gi;
+    for (const match of command.matchAll(nodeModulesRegex)) {
+        if (match[1]) appendProtectedPathReference(refs, match[1], false);
+    }
+
+    return refs;
+}
+
+function extractProtectedDirRefsFromCommand(command: string): Set<string> {
     const analysis = analyzeBashScript(command);
-    if (!analysis.parseError) {
-        for (const invocation of analysis.invocations) {
-            const allowTrustedRead = invocationReadsPathsOnly(invocation);
+    if (analysis.parseError) return extractProtectedDirRefsFromUnparsedCommand(command);
 
-            appendProtectedPathReference(refs, seen, invocation.commandNameRaw, false);
-            appendProtectedPathReference(refs, seen, invocation.effectiveCommandNameRaw, false);
-            for (const arg of invocation.effectiveArgs) {
-                appendProtectedPathReference(refs, seen, arg, allowTrustedRead);
-            }
-            for (const redirection of invocation.redirections) {
-                appendProtectedPathReference(refs, seen, redirection.target, false);
-            }
-        }
-    } else {
-        // Parser failures stay fail-closed because command context is unavailable
-        const gitDirRegex =
-            /(?:^|\s|[<>|;&"'`])([^\s<>|;&"'`]*\.git[/\\][^\s<>|;&"'`]*)((?:\s|$|[<>|;&"'`]))/gi;
-        for (const match of command.matchAll(gitDirRegex)) {
-            if (match[1]) appendProtectedPathReference(refs, seen, match[1], false);
-        }
+    const refs = new Set<string>();
+    for (const invocation of analysis.invocations) {
+        // Read-only commands may reference node_modules anywhere, including as filter patterns
+        const allowNodeModules = invocationReadsPathsOnly(invocation);
 
-        const nodeModulesRegex =
-            /(?:^|\s|[<>|;&"'`])([^\s<>|;&"'`]*node_modules[/\\][^\s<>|;&"'`]*)((?:\s|$|[<>|;&"'`]))/gi;
-        for (const match of command.matchAll(nodeModulesRegex)) {
-            if (match[1]) appendProtectedPathReference(refs, seen, match[1], false);
+        appendProtectedPathReference(refs, invocation.commandNameRaw, false);
+        appendProtectedPathReference(refs, invocation.effectiveCommandNameRaw, false);
+        for (const arg of invocation.effectiveArgs) {
+            appendProtectedPathReference(refs, arg, allowNodeModules);
+        }
+        for (const redirection of invocation.redirections) {
+            appendProtectedPathReference(refs, redirection.target, false);
         }
     }
 
@@ -575,9 +487,7 @@ function detectDangerousCommand(command: string): { kind: "delete" | "piped shel
 // Extension
 // ============================================================================
 
-export default function (pi: ExtensionAPI, options: ProtectPathsOptions = {}) {
-    const { trustedReadPaths } = loadProtectPathsConfig(options.configPath);
-
+export default function (pi: ExtensionAPI) {
     // --- Directory protection for file-oriented tools ---
     pi.on("tool_call", async (event, ctx) => {
         const isReadTool = READ_TOOLS.includes(event.toolName);
@@ -587,8 +497,7 @@ export default function (pi: ExtensionAPI, options: ProtectPathsOptions = {}) {
         const filePath = extractPathFromInput(event.input);
         if (!filePath) return;
 
-        const allowTrustedRead = isReadTool;
-        if (isProtectedDirectory(filePath, allowTrustedRead, trustedReadPaths)) {
+        if (isProtectedDirectory(filePath, isReadTool)) {
             ctx.ui.notify(`Blocked access to protected path: ${filePath}`, "warning");
             return {
                 block: true,
@@ -609,11 +518,11 @@ export default function (pi: ExtensionAPI, options: ProtectPathsOptions = {}) {
         const refs = extractProtectedDirRefsFromCommand(command);
 
         for (const ref of refs) {
-            if (isProtectedDirectory(ref.path, ref.allowTrustedRead, trustedReadPaths)) {
-                ctx.ui.notify(`Blocked access to protected path: ${ref.path}`, "warning");
+            if (isProtectedDirectory(ref, false)) {
+                ctx.ui.notify(`Blocked access to protected path: ${ref}`, "warning");
                 return {
                     block: true,
-                    reason: `Command references protected path ${ref.path}. ${getProtectionReason(ref.path)}`,
+                    reason: `Command references protected path ${ref}. ${getProtectionReason(ref)}`,
                 };
             }
         }
