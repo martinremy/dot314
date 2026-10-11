@@ -500,7 +500,7 @@ export default function notifyExtension(pi: ExtensionAPI) {
 
 			const choice = await ctx.ui.select("Notification Settings", menuItems);
 
-			if (choice === null) return;
+			if (choice === undefined) return;
 
 			// Toggle notifications
 			if (choice === menuItems[0]) {
@@ -529,7 +529,7 @@ export default function notifyExtension(pi: ExtensionAPI) {
 			// Set max volume
 			if (choice === menuItems[4]) {
 				const input = await ctx.ui.input("Max volume (0.0 - 1.0+)", String(config.volume.max));
-				if (input !== null) {
+				if (input !== undefined) {
 					const vol = parseFloat(input);
 					if (!isNaN(vol) && vol >= 0) {
 						config.volume.max = vol;
@@ -545,7 +545,7 @@ export default function notifyExtension(pi: ExtensionAPI) {
 			// Set min volume (only in timeScaled mode)
 			if (config.volume.mode === "timeScaled" && choice === menuItems[5]) {
 				const input = await ctx.ui.input("Min volume (0.0 - 1.0+)", String(config.volume.min));
-				if (input !== null) {
+				if (input !== undefined) {
 					const vol = parseFloat(input);
 					if (!isNaN(vol) && vol >= 0) {
 						config.volume.min = vol;
@@ -565,7 +565,7 @@ export default function notifyExtension(pi: ExtensionAPI) {
 					"Minimum duration (seconds)",
 					String(config.minDurationSeconds)
 				);
-				if (input !== null) {
+				if (input !== undefined) {
 					const num = parseInt(input, 10);
 					if (!isNaN(num) && num >= 0) {
 						config.minDurationSeconds = num;
@@ -584,7 +584,7 @@ export default function notifyExtension(pi: ExtensionAPI) {
 			if (choice === menuItems[soundIndex]) {
 				const soundAliases = config.sounds.map((s) => s.alias);
 				const soundChoice = await ctx.ui.select("Select sound", soundAliases);
-				if (soundChoice !== null) {
+				if (soundChoice !== undefined) {
 					config.sound = soundChoice;
 					saveConfig(config);
 					const soundEntry = findSound(config, soundChoice);
