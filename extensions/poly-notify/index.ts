@@ -2,12 +2,15 @@
  * Desktop Notification Extension
  *
  * Sends a native desktop notification (with optional sound) when the agent finishes,
- * but only if the response took longer than a configurable threshold.
+ * or when it waits on a dialog, but only if the run took longer than a configurable threshold.
  *
  * Features:
  * - /notify command to configure (or quick: /notify on|off|popup|pushover|<seconds>|<sound>|volume)
  * - Configurable hotkey (default Alt+N) to toggle on/off
- * - Only notifies if agent turn took >= minDurationSeconds
+ * - Only notifies if the agent run took >= minDurationSeconds
+ * - Notifies once Pi has fully settled (after retries, compaction, and queued follow-ups)
+ * - Skips runs you cancel (e.g. with Escape)
+ * - Notifies when a run waits on a dialog, such as a permission prompt
  * - Configurable sounds: system sounds, custom paths, silent, or random
  * - "silent" reserved alias: no sound plays (popup only if enabled)
  * - "random" reserved alias: randomly picks from all sounds with paths
@@ -608,22 +611,34 @@ export default function notifyExtension(pi: ExtensionAPI) {
 	// Agent Lifecycle Events
 	// =========================================================================
 
+	function notifyIfRunLongEnough(startTime: number, body: string): void {
+		if (!config.enabled || (config.interactiveOnly && !isInteractive)) return;
+
+		const elapsedSeconds = (Date.now() - startTime) / 1000;
+		if (elapsedSeconds >= config.minDurationSeconds) {
+			notify("𝞹", body, config, elapsedSeconds);
+		}
+	}
+
 	pi.on("agent_start", async () => {
-		agentStartTime = Date.now();
+		// Retries and continuations start new agent loops within the same run.
+		agentStartTime ??= Date.now();
 	});
 
-	pi.on("agent_end", async () => {
-		if (!config.enabled || agentStartTime === null || (config.interactiveOnly && !isInteractive)) {
-			agentStartTime = null;
-			return;
-		}
-
-		const elapsedSeconds = (Date.now() - agentStartTime) / 1000;
+	// Not agent_end: Pi can still retry, compact, or run queued follow-ups after it.
+	pi.on("agent_settled", async (event) => {
+		const startTime = agentStartTime;
 		agentStartTime = null;
+		if (startTime === null || event.aborted) return;
 
-		if (elapsedSeconds >= config.minDurationSeconds) {
-			notify("𝞹", "⟳", config, elapsedSeconds);
-		}
+		notifyIfRunLongEnough(startTime, "⟳");
+	});
+
+	// A dialog opened mid-run blocks the agent until you answer it.
+	pi.on("ui_prompt_start", async () => {
+		if (agentStartTime === null) return;
+
+		notifyIfRunLongEnough(agentStartTime, "?");
 	});
 
 	// =========================================================================

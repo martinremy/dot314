@@ -1,6 +1,6 @@
 # Notifications for Pi (`pi-poly-notify`)
 
-Sends notifications when an agent turn finishes and took longer than a configurable threshold.
+Sends a notification when an agent run that took longer than a configurable threshold finishes, or stops to wait for your answer in a dialog such as a permission prompt. Runs you cancel, for example with Escape, don't send one.
 
 Supports:
 - desktop popups (macOS)
@@ -58,5 +58,6 @@ Quick forms:
 
 ## Notes
 
+- Requires Pi 0.84.4 or later; skipping cancelled runs requires Pi 1.1.0 or later
 - macOS-only out of the box (uses `osascript` + `afplay`)
 - Pushover requires `curl` and valid `userKey` + `apiToken` in config

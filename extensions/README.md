@@ -151,7 +151,7 @@
   - Configurations stored in [`model-sysprompt-appendix/model-sysprompt-appendix.json`](model-sysprompt-appendix/model-sysprompt-appendix.json)
 
 - ● [`poly-notify/`](poly-notify/)
-  - Desktop / sound / Pushover notifications (e.g. to smart watch) when an agent turn completes and exceeds a duration threshold
+  - Desktop / sound / Pushover notifications (e.g. to smart watch) when an agent run that exceeds a duration threshold finishes or stops at a dialog (e.g. a permission prompt); cancelled runs don't notify
   - Sound aliases include `random` (randomly picks from configured list of sounds)
   - Volume modes: `constant` or `timeScaled`
   - `/notify` interactive menu, plus quick toggles (`/notify on|off|popup|pushover|volume|<seconds>|<sound>`)
