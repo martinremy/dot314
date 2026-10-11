@@ -41,10 +41,6 @@
   - Controls Chrome directly via CLI. Broad feature set: DevTools streaming, network/CPU emulation, AI queries (ChatGPT/Gemini/Perplexity/Grok) in addition to navigation, screenshots, and form filling
   - Requires global install: `npm install -g surf-cli`
 
-- ○ [`deep-x-research/`](deep-x-research/) (upstream: [nicobailon/surf-cli](https://github.com/nicobailon/surf-cli))
-  - Research procedure built on surf-cli: exhaustive, multi-angle X (Twitter) research with categorized findings and full post-URL traceability. Requires x.com login in Chrome
-  - Requires global install: `npm install -g surf-cli`
-
 - ○ [`gdcli/`](gdcli/) (upstream: [badlogic/pi-skills](https://github.com/badlogic/pi-skills))
   - `SKILL.md`: Google Drive CLI usage
 
