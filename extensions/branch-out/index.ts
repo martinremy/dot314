@@ -1281,8 +1281,6 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("branch", {
 		description: "Fork current session into a new terminal tab or split pane, optionally queueing --model <query> and a draft message",
 		handler: async (args, ctx) => {
-			await ctx.waitForIdle()
-
 			const sessionFile = ctx.sessionManager.getSessionFile()
 			if (!sessionFile) {
 				if (ctx.hasUI) ctx.ui.notify("Session is not persisted. Restart without --no-session.", "error")

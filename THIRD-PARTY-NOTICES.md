@@ -100,7 +100,7 @@ text. This file provides a consolidated overview.
 - **License:** MIT
 - **Copyright:** © 2016 David Gasquez
 - **Used in:**
-  - `extensions/branch-out/` (◐ modified — renamed from `branch-term`; added cmux support, config-driven split/tab routing, iTerm2/Terminal/Ghostty routing, rotating layout policies, and split-direction fallback lists)
+  - `extensions/branch-out/` (◐ modified; renamed from `branch-term`; added cmux support, config-driven split/tab routing, iTerm2/Terminal/Ghostty routing, rotating layout policies, split-direction fallback lists, and mid-turn branching)
 
 ### pasky/pi-amplike
 - **URL:** https://github.com/pasky/pi-amplike
