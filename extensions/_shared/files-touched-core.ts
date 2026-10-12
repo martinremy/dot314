@@ -548,15 +548,30 @@ function tokenizeShellCommand(cmd: string): string[] {
 function splitCommandSources(cmd: string): string[] {
 	const commands: string[] = [];
 	let start = 0;
-	let quote: "'" | '"' | null = null;
+	// True between words, the only place where # starts a comment
+	let atWordStart = true;
+	// The ) that closes a $(...) ends the substitution, not the word that contains it
+	const substitutionCloses = new Set<number>();
 	for (let index = 0; index < cmd.length; index++) {
-		const char = cmd[index];
-		if (char === "\\" && quote !== "'") { index++; continue; }
-		if (quote) {
-			if (char === quote) quote = null;
+		const opaqueEnd = skipShellQuoting(cmd, index) ?? skipShellArithmetic(cmd, index);
+		if (opaqueEnd !== undefined) {
+			index = opaqueEnd - 1;
+			atWordStart = false;
 			continue;
 		}
-		if (char === "'" || char === '"') { quote = char; continue; }
+		const char = cmd[index];
+		if (char === "#" && atWordStart) {
+			commands.push(cmd.slice(start, index));
+			const lineEnd = cmd.indexOf("\n", index);
+			index = lineEnd === -1 ? cmd.length : lineEnd;
+			start = index + 1;
+			continue;
+		}
+		if (cmd.startsWith("$(", index)) substitutionCloses.add(findParenGroupEnd(cmd, index + 1) - 1);
+		atWordStart = SHELL_WORD_BOUNDARY.test(char) && !substitutionCloses.has(index);
+		// Redirection operators containing & or | (>&, <&, >|, &>, &>>) stay inside the current command
+		if ((char === ">" || char === "<") && (cmd[index + 1] === "&" || (char === ">" && cmd[index + 1] === "|"))) { index++; continue; }
+		if (char === "&" && cmd[index + 1] === ">") continue;
 		if (!";|&\r\n".includes(char)) continue;
 		commands.push(cmd.slice(start, index));
 		start = index + 1;
@@ -668,64 +683,151 @@ function pushShellMove(actions: FileAction[], from: string, to: string): void {
 	}
 }
 
-function extractRedirectWriteTargets(tokens: string[], actions: FileAction[]): void {
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i];
+// Longest first, so a shorter operator never matches the start of a longer one
+const SHELL_REDIRECTION_OPERATORS = ["&>>", "<<<", "<<-", "<<~", "&>", ">>", ">&", ">|", "<<", "<&", "<>", ">", "<"] as const;
+type ShellRedirectionOperator = typeof SHELL_REDIRECTION_OPERATORS[number];
+const OUTPUT_FILE_REDIRECTIONS: ReadonlySet<ShellRedirectionOperator> = new Set(["&>>", "&>", ">>", ">|", ">"]);
 
-		if (token === ">" || token === ">>") {
-			if (i + 1 < tokens.length && !isIgnoredRedirectTarget(tokens[i + 1])) {
-				pushShellTouch(actions, tokens[i + 1], "write");
-			}
-			i += 1;
+// Unquoted characters that end a shell word
+const SHELL_WORD_BOUNDARY = /[\s()<>;&|]/;
+
+/** Returns the index just past a backslash escape or quoted string starting at `index`, or undefined when none starts there */
+function skipShellQuoting(source: string, index: number): number | undefined {
+	const char = source[index];
+	if (char === "\\") return Math.min(index + 2, source.length);
+	if (char !== "'" && char !== '"') return undefined;
+	for (let end = index + 1; end < source.length; end++) {
+		if (char === '"' && source[end] === "\\") {
+			end++;
 			continue;
 		}
-
-		if (token.startsWith(">>") && token.length > 2) {
-			const target = token.slice(2);
-			if (!isIgnoredRedirectTarget(target)) {
-				pushShellTouch(actions, target, "write");
-			}
+		// A command substitution inside double quotes has its own quoting, so its quotes do not end the string
+		if (char === '"' && source.startsWith("$(", end)) {
+			end = findParenGroupEnd(source, end + 1) - 1;
 			continue;
 		}
-
-		if (token.startsWith(">") && token.length > 1) {
-			const target = token.slice(1);
-			if (!isIgnoredRedirectTarget(target)) {
-				pushShellTouch(actions, target, "write");
-			}
-			continue;
-		}
+		if (source[end] === char) return end + 1;
 	}
+	return source.length;
+}
+
+function readShellRedirectionOperator(source: string, offset: number): ShellRedirectionOperator | undefined {
+	const operator = SHELL_REDIRECTION_OPERATORS.find((candidate) => source.startsWith(candidate, offset));
+	// <( and >( start process substitutions, not redirections
+	if ((operator === ">" || operator === "<") && source[offset + 1] === "(") return undefined;
+	// zsh reads >>(cmd) as > followed by the process substitution >(cmd)
+	if (operator === ">>" && source[offset + 2] === "(") return ">";
+	return operator;
+}
+
+const PROCESS_SUBSTITUTION_START = /^[<>]\(/;
+
+function findShellWordEnd(source: string, start: number): number {
+	let index = start;
+	while (index < source.length && !SHELL_WORD_BOUNDARY.test(source[index])) {
+		// $(...) and $((...)) belong to the word even though they contain parentheses and spaces
+		index = skipShellQuoting(source, index) ?? (source.startsWith("$(", index) ? findParenGroupEnd(source, index + 1) : index + 1);
+	}
+	return index;
+}
+
+/**
+ * Returns the index just past the parenthesis that closes the one at `openIndex`, or the source length when it is unclosed.
+ * Quoted and escaped parentheses are text, not nesting.
+ */
+function findParenGroupEnd(source: string, openIndex: number): number {
+	let depth = 0;
+	for (let index = openIndex; index < source.length; index++) {
+		const quotedEnd = skipShellQuoting(source, index);
+		if (quotedEnd !== undefined) {
+			index = quotedEnd - 1;
+			continue;
+		}
+		if (source[index] === "(") depth++;
+		else if (source[index] === ")" && --depth === 0) return index + 1;
+	}
+	return source.length;
+}
+
+/**
+ * Returns the index just past an arithmetic expansion $((...)) starting at `index`, or an arithmetic command ((...))
+ * starting a word there, otherwise undefined. Their | & < > are operators, not separators or redirections.
+ */
+function skipShellArithmetic(source: string, index: number): number | undefined {
+	if (source.startsWith("$((", index)) return findParenGroupEnd(source, index + 1);
+	const startsWord = index === 0 || SHELL_WORD_BOUNDARY.test(source[index - 1]);
+	return startsWord && source.startsWith("((", index) ? findParenGroupEnd(source, index) : undefined;
+}
+
+/** A redirection target word: where it ends, and the file writes it records */
+type ShellRedirectionTarget = { end: number; actions: FileAction[] };
+
+/** Reads the target word of the redirection operator that ends at `operatorEnd` */
+function readShellRedirectionTarget(source: string, operator: ShellRedirectionOperator, operatorEnd: number): ShellRedirectionTarget {
+	let targetStart = operatorEnd;
+	while (source[targetStart] === " " || source[targetStart] === "\t") targetStart++;
+	// A process substitution such as >(cat) starts the target word even though it begins with a redirection character
+	if (PROCESS_SUBSTITUTION_START.test(source.slice(targetStart, targetStart + 2))) {
+		const substitutionEnd = findParenGroupEnd(source, targetStart + 1);
+		// The substituted command's own literal output redirections still write files
+		const innerCommand = source.slice(targetStart + 2, substitutionEnd).replace(/\)$/, "");
+		return { end: findShellWordEnd(source, substitutionEnd), actions: parseShellRedirections(innerCommand).actions };
+	}
+	const end = findShellWordEnd(source, targetStart);
+	const target = tokenizeShellCommand(source.slice(targetStart, end)).at(0);
+	const actions: FileAction[] = [];
+	if (target !== undefined && OUTPUT_FILE_REDIRECTIONS.has(operator) && !isIgnoredRedirectTarget(target)) {
+		pushShellTouch(actions, target, "write");
+	}
+	return { end, actions };
+}
+
+/** One command segment with its redirections removed, and the file writes those redirections record */
+type ParsedShellRedirections = { commandSource: string; actions: FileAction[] };
+
+/**
+ * Removes every redirection (operator, adjacent descriptor prefix, and target word) from one raw command segment,
+ * returning the remaining command text and a write action for each literal output-file target.
+ * Works on raw text so quoted or escaped operator characters stay literal.
+ */
+function parseShellRedirections(source: string): ParsedShellRedirections {
+	const actions: FileAction[] = [];
+	const retained: string[] = [];
+	let keptFrom = 0;
+	let wordStart = 0;
+	let index = 0;
+
+	while (index < source.length) {
+		const opaqueEnd = skipShellQuoting(source, index) ?? skipShellArithmetic(source, index);
+		if (opaqueEnd !== undefined) {
+			index = opaqueEnd;
+			continue;
+		}
+
+		const operator = readShellRedirectionOperator(source, index);
+		if (operator) {
+			// A descriptor prefix is the whole unquoted word touching the operator, as in 2>err.log
+			const start = operator[0] !== "&" && /^\d+$/.test(source.slice(wordStart, index)) ? wordStart : index;
+			const target = readShellRedirectionTarget(source, operator, index + operator.length);
+			actions.push(...target.actions);
+			// A space keeps the words on either side of the removed redirection apart
+			retained.push(source.slice(keptFrom, start), " ");
+			keptFrom = target.end;
+			index = target.end;
+			wordStart = index;
+			continue;
+		}
+
+		index++;
+		if (SHELL_WORD_BOUNDARY.test(source[index - 1])) wordStart = index;
+	}
+
+	retained.push(source.slice(keptFrom));
+	return { commandSource: retained.join(""), actions };
 }
 
 function looksLikeSedExpression(value: string): boolean {
 	return /^[sy]?\/.+\//.test(value) || /^\d+[,\d]*[acdipqs]?$/.test(value);
-}
-
-function stripRedirectTokens(tokens: string[]): string[] {
-	const result: string[] = [];
-
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i];
-
-		if (token === ">" || token === ">>" || token === ">|" || token === "<") {
-			i += 1;
-			continue;
-		}
-
-		if (token === "<<" || token === "<<-" || token === "<<~") {
-			i += 1;
-			continue;
-		}
-
-		if (token.startsWith(">>") || token.startsWith(">") || token.startsWith("<<") || token.startsWith("<")) {
-			continue;
-		}
-
-		result.push(token);
-	}
-
-	return result;
 }
 
 function stripHeredocBodies(cmd: string): string {
@@ -845,10 +947,9 @@ const SHELL_COMMAND_HANDLERS = [
 	handleReadShellCommand,
 ];
 
-function parseShellCommand(tokens: string[]): ParsedShellCommand {
-	const actions: FileAction[] = [];
-	extractRedirectWriteTargets(tokens, actions);
-	const command = stripShellCommandWrappers(stripRedirectTokens(tokens));
+function parseShellCommand(source: string): ParsedShellCommand {
+	const { commandSource, actions } = parseShellRedirections(source);
+	const command = stripShellCommandWrappers(tokenizeShellCommand(commandSource));
 	for (const handle of SHELL_COMMAND_HANDLERS) if (handle(command, actions)) break;
 	return { command, actions };
 }
@@ -1063,8 +1164,8 @@ export function parseCompletedCodexFileActions(args: {
 
 function parseShellFileActions(cmd: string, workdir?: string): ParsedFileActions {
 	const result: ParsedFileActions = { actions: [], incomplete: false };
-	for (const tokens of splitShellCommands(stripHeredocBodies(cmd))) {
-		const parsedCommand = parseShellCommand(tokens);
+	for (const source of splitCommandSources(stripHeredocBodies(cmd))) {
+		const parsedCommand = parseShellCommand(source);
 		result.actions.push(...(workdir === undefined ? parsedCommand.actions : rebaseShellActions(parsedCommand.actions, workdir)));
 		const command = parsedCommand.command;
 		if (!command[0] || !["rp-cli", "rpce-cli"].includes(path.basename(command[0]))) continue;

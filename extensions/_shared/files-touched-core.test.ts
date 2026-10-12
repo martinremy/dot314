@@ -402,6 +402,125 @@ test("collectFilesTouched ignores redirections to /dev/null", async () => {
 	}
 });
 
+const OPERATION_LETTERS = { read: "R", write: "W", edit: "E", move: "M", delete: "D" } as const;
+
+/** Runs one shell command through the collector and returns sorted "<ops> <displayPath>" lines */
+async function recordShellCommand(
+	command: string,
+	tool: { name: "bash" } | { name: "exec_command"; workdir: string } = { name: "bash" },
+): Promise<string[]> {
+	const harness = await createRepoHarness();
+	try {
+		const args = tool.name === "bash" ? { command } : { cmd: command, workdir: tool.workdir };
+		const files = collectFilesTouched([toolCall("1", tool.name, args), toolResult("1", 1)], harness.cwd);
+		return files
+			.map((file) => `${[...file.operations].map((operation) => OPERATION_LETTERS[operation]).sort().join("")} ${file.displayPath}`)
+			.sort();
+	} finally {
+		await harness.cleanup();
+	}
+}
+
+const REDIRECTED_COMMANDS: ReadonlyArray<readonly [command: string, expected: readonly string[]]> = [
+	["rm -f build.log 2>/dev/null", ["D build.log"]],
+	["rm -f a.txt 2> /dev/null", ["D a.txt"]],
+	["trash old.txt 2>&1", ["D old.txt"]],
+	["git rm -q gone.ts 2>/dev/null", ["D gone.ts"]],
+	["cat notes.md 2>/dev/null", ["R notes.md"]],
+	["head -n 5 a.md 2> /dev/null", ["R a.md"]],
+	["tail -n 20 log.txt 2>&1", ["R log.txt"]],
+	["cp src.ts dest.ts 2> /dev/null", ["W dest.ts"]],
+	["rsync -a in/ out/ 2>/dev/null", ["W out"]],
+	["echo hi | tee out.txt 2>/dev/null", ["W out.txt"]],
+	["touch new.ts 2> /dev/null", ["W new.ts"]],
+	["sed -i 's/a/b/' cfg.ts 2>/dev/null", ["E cfg.ts"]],
+	["patch 2>/dev/null -p1 fix.ts < fix.patch", ["E fix.ts"]],
+	["mv a.txt b.txt 2>/dev/null", ["M b.txt"]],
+	["mv a.txt b.txt 2>", ["M b.txt"]],
+	["git mv old.ts new.ts 2>&1", ["M new.ts"]],
+	["echo done >&2", []],
+	["make 2>&1 | tee build.log", ["W build.log"]],
+	["ls src 2>/dev/null", []],
+	["VER=$(node -v 2>/dev/null)", []],
+	["(cd sub && make 2>/dev/null)", []],
+	["for f in $(ls *.ts 2>/dev/null); do echo $f; done", []],
+	["cat <<< notes.md", []],
+	["cat 3<> fd.txt", []],
+	["echo $((1>0))", []],
+	["mv a.txt b.txt >$((1+1))", ["M b.txt"]],
+	["cp src.ts dest.ts >$((1+1))", ["W dest.ts"]],
+	["mv a.txt b.txt >log-$((1+1)).txt", ["M b.txt"]],
+	["cat notes.md > $(mktemp)", ["R notes.md"]],
+	["cp src.ts dest.ts 2>$(mktemp -u)", ["W dest.ts"]],
+	["echo $((1|2>0)) && touch after.txt", ["W after.txt"]],
+	["((1|2>0)); touch after.txt", ["W after.txt"]],
+	["echo $((1&&2>0)) && touch after.txt", ["W after.txt"]],
+	["printf payload >$(printf '(') >out.log", ["W out.log"]],
+	["printf payload >$(printf ')') >out.log", ["W out.log"]],
+	["mv a.txt b.txt > >(cat)", ["M b.txt"]],
+	["cp src.ts dest.ts > >(cat)", ["W dest.ts"]],
+	["mv a.txt b.txt < <(true)", ["M b.txt"]],
+	["mv a.txt b.txt > >(cat >copy.log)", ["M b.txt", "W copy.log"]],
+	[`printf payload >$(printf '%s' "$(printf "(")") >out.log`, ["W out.log"]],
+	["mv a.txt b.txt > >(cat)$(:)", ["M b.txt"]],
+	["cp src.ts dest.ts > >(cat)$(:)", ["W dest.ts"]],
+	["mv a.txt b.txt > >(cat >copy.log)$(:)", ["M b.txt", "W copy.log"]],
+	["# let's check issue_id -> issues\nmv a.txt b.txt", ["M b.txt"]],
+	["touch a.txt # it's done -> b", ["W a.txt"]],
+	["cat notes#1.md", ["R notes#1.md"]],
+	["mv a.txt b.txt >>(cat)", ["M b.txt"]],
+	["mv a.txt b\\;#tag.txt", ["M b;#tag.txt"]],
+	["printf payload >$(printf logfile)#suffix >out.log", ["W out.log"]],
+];
+
+for (const [command, expected] of REDIRECTED_COMMANDS) {
+	test(`collectFilesTouched excludes redirection syntax from command operands: ${command}`, async () => {
+		assert.deepEqual(await recordShellCommand(command), expected);
+		assert.deepEqual(
+			await recordShellCommand(command, { name: "exec_command", workdir: "pkg" }),
+			expected.map((line) => line.replace(" ", " pkg/")).sort(),
+		);
+	});
+}
+
+test("collectFilesTouched records output-file redirections and ignores descriptor duplication", async () => {
+	assert.deepEqual(
+		await recordShellCommand(
+			"run 1>out.txt 2>err.log && run 2>>err2.log && run &>all.log && run &>>all2.log && run >|forced.txt && echo a>glued.txt",
+		),
+		["W all.log", "W all2.log", "W err.log", "W err2.log", "W forced.txt", "W glued.txt", "W out.txt"],
+	);
+	assert.deepEqual(
+		await recordShellCommand("run 2>/dev/null >/dev/stdout &>/dev/null && run 2>&1 >&2 && run 2>$ERR_LOG"),
+		[],
+	);
+});
+
+test("collectFilesTouched treats quoted and escaped redirection characters as literal text", async () => {
+	assert.deepEqual(await recordShellCommand("cat '2>report.txt'"), ["R 2>report.txt"]);
+	assert.deepEqual(await recordShellCommand("cat 2\\>report.txt"), ["R 2>report.txt"]);
+	assert.deepEqual(await recordShellCommand('run 2>"err log"'), ["W err log"]);
+	assert.deepEqual(await recordShellCommand("cat 2 >out.txt"), ["R 2", "W out.txt"]);
+	assert.deepEqual(await recordShellCommand("cat '2'>out.txt"), ["R 2", "W out.txt"]);
+	assert.deepEqual(await recordShellCommand("grep '>' notes.md"), []);
+});
+
+test("collectFilesTouched keeps command separators next to redirections", async () => {
+	assert.deepEqual(await recordShellCommand("run 2>&1 && touch after.txt"), ["W after.txt"]);
+	assert.deepEqual(await recordShellCommand("echo \\>& touch bg.txt"), ["W bg.txt"]);
+	assert.deepEqual(
+		await recordShellCommand("cat a.md 2>/dev/null | tee copy.md; rm -f tmp.txt 2>&1"),
+		["D tmp.txt", "R a.md", "W copy.md"],
+	);
+});
+
+test("parseCompletedCodexFileActions rebases real operands and redirect destinations only", async () => {
+	assert.deepEqual(
+		await recordShellCommand("mv a.txt b.txt 2>err.log", { name: "exec_command", workdir: "pkg" }),
+		["M pkg/b.txt", "W pkg/err.log"],
+	);
+});
+
 test("collectFilesTouched tracks touch as write", async () => {
 	const harness = await createRepoHarness();
 
