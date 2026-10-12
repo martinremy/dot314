@@ -1,7 +1,7 @@
 {
     "includeFilesTouched": {
-        "inCompactionSummary": true,
-        "inBranchSummary": true
+        "inCompactionSummary": "writer",
+        "inBranchSummary": "writer"
     },
     "toolResultChars": 2000,
     "defaultPreset": "default",

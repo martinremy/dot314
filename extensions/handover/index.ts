@@ -13,6 +13,8 @@ import type {
     SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { Type, type Static } from "typebox";
+import { Check } from "typebox/value";
 
 import { collectFilesTouched, registerFilesTouchedTracking, type FilesTouchedEntry } from "../_shared/files-touched-core.ts";
 
@@ -64,9 +66,61 @@ Concrete next actions in execution order. Note dependencies between steps. If th
 - Output only markdown for the summary
 `;
 
+const FilesTouchedModeSchema = Type.Union([Type.Literal("off"), Type.Literal("writer"), Type.Literal("writerAndReader")]);
+
+/** Who sees the files-touched list: nobody, the drafting model only, or the drafting model and the child session */
+type FilesTouchedMode = Static<typeof FilesTouchedModeSchema>;
+
+// Fields are checked separately: an invalid includeFilesTouched fails, while an invalid autoSubmitSeconds keeps its default
+const ConfigFileSchema = Type.Object({
+    autoSubmitSeconds: Type.Optional(Type.Unknown()),
+    includeFilesTouched: Type.Optional(Type.Unknown()),
+});
+const AutoSubmitSecondsSchema = Type.Number();
+
 type ExtensionConfig = {
     autoSubmitSeconds: number;
+    includeFilesTouched: FilesTouchedMode;
 };
+
+/** The files-touched list for one handover; only "writerAndReader" also appends it to the child draft */
+type FilesTouchedLedger =
+    | { mode: "off" }
+    | { mode: "writer" | "writerAndReader"; block: string };
+
+type HandoverDependencies = {
+    configPath: string;
+    collectFilesTouched: typeof collectFilesTouched;
+};
+
+const DEFAULT_CONFIG: ExtensionConfig = {
+    autoSubmitSeconds: DEFAULT_AUTO_SUBMIT_SECONDS,
+    includeFilesTouched: "writer",
+};
+
+const NO_FILE_INVENTORY_CONSTRAINT = "- do not add a files-touched section, files modified section, files changed section, or any other exhaustive file inventory";
+const MOVED_FILE_GUIDANCE = "for moves established by the conversation, refer to the file by its final path, and mention an old path only to explain the move, relevant history, or an unresolved discrepancy";
+
+const FILES_TOUCHED_CONSTRAINTS = {
+    off: [NO_FILE_INVENTORY_CONSTRAINT],
+    writer: [
+        "- use the files-touched list below as factual input; it may canonicalize moved paths and does not establish current filesystem state or event order",
+        "- the list is input for you only and will not be included in the final handover; do not reproduce it, restate it exhaustively, or refer the next agent to it",
+        "- name in the relevant sections the files the next agent needs, especially files written, edited, moved, or deleted that continuing the work depends on, and list in \"Mandatory reading\" only the ones to open first",
+        `- ${MOVED_FILE_GUIDANCE}; do not infer a source-to-destination mapping from the list alone`,
+        NO_FILE_INVENTORY_CONSTRAINT,
+    ],
+    writerAndReader: [
+        "- use the files-touched list below as factual input; it will be appended verbatim to the final handover draft",
+        "- mention in \"Mandatory reading\" only the subset that matters for continuation; do not restate the full list",
+        `${NO_FILE_INVENTORY_CONSTRAINT}; the system will append the authoritative list verbatim`,
+        "- do not duplicate the full list in prose",
+        `- the list shows a moved or renamed file only at its final path; ${MOVED_FILE_GUIDANCE}`,
+    ],
+} satisfies Record<FilesTouchedMode, readonly string[]>;
+
+// Matches the files-touched tail that grounded-compaction appends to saved compaction summaries
+const COMPACTION_LEDGER_TAIL_PATTERN = /(?:(?:^|\n{2,})(?:---\n\n)?## Files touched(?: \(cumulative\))?\nR=read, W=write, E=edit, M=move\/rename, D=delete\n\n```text\n(?:(?!\n```)[\s\S])*\n```)+\s*$/;
 
 type PendingAutoSubmit = {
     ctx: ExtensionContext;
@@ -155,23 +209,35 @@ function getStatusLine(ctx: ExtensionContext, seconds: number): string {
     return `${accent} ${hint}`;
 }
 
-async function loadConfig(): Promise<ExtensionConfig> {
-    const fallback: ExtensionConfig = { autoSubmitSeconds: DEFAULT_AUTO_SUBMIT_SECONDS };
+/** Parses config.json text; throws on invalid JSON, a non-object top level, or an invalid includeFilesTouched */
+function parseConfig(text: string): ExtensionConfig {
+    const value: unknown = JSON.parse(text);
+    if (!Check(ConfigFileSchema, value)) {
+        throw new Error("Invalid handover config: top-level value must be an object");
+    }
 
+    const { autoSubmitSeconds, includeFilesTouched = DEFAULT_CONFIG.includeFilesTouched } = value;
+    if (!Check(FilesTouchedModeSchema, includeFilesTouched)) {
+        throw new Error('Invalid handover config: includeFilesTouched must be "off", "writer", or "writerAndReader"');
+    }
+
+    return {
+        autoSubmitSeconds: Check(AutoSubmitSecondsSchema, autoSubmitSeconds)
+            ? Math.max(0, Math.min(300, Math.floor(autoSubmitSeconds)))
+            : DEFAULT_AUTO_SUBMIT_SECONDS,
+        includeFilesTouched,
+    };
+}
+
+/** A missing file yields defaults; any other read, JSON, or validation failure throws with the config path */
+async function loadConfig(configPath: string): Promise<ExtensionConfig> {
     try {
-        const raw = await readFile(CONFIG_PATH, "utf8");
-        const parsed = JSON.parse(raw) as Partial<ExtensionConfig>;
-        const rawSeconds = parsed.autoSubmitSeconds;
-
-        if (typeof rawSeconds !== "number" || Number.isNaN(rawSeconds)) {
-            return fallback;
+        return parseConfig(await readFile(configPath, "utf8"));
+    } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+            return { ...DEFAULT_CONFIG };
         }
-
-        return {
-            autoSubmitSeconds: Math.max(0, Math.min(300, Math.floor(rawSeconds))),
-        };
-    } catch {
-        return fallback;
+        throw new Error(`Failed to load handover config from ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
 
@@ -285,13 +351,14 @@ async function buildPriorCompactionsAddendum(ctx: ExtensionCommandContext): Prom
         const maxTotalChars = 12000;
 
         const lines: string[] = [];
-        lines.push("## Prior compaction summaries (verbatim)");
+        lines.push("## Prior compaction summaries");
         lines.push("");
 
         let used = 0;
         for (let i = prior.length - 1; i >= 0; i -= 1) {
             const record = prior[i];
-            const summary = (record.summary ?? "").trim();
+            // The fresh files-touched list supersedes ledgers saved with older summaries
+            const summary = (record.summary ?? "").trimEnd().replace(COMPACTION_LEDGER_TAIL_PATTERN, "").trim();
             if (!summary) {
                 continue;
             }
@@ -310,7 +377,8 @@ async function buildPriorCompactionsAddendum(ctx: ExtensionCommandContext): Prom
             used += block.length;
         }
 
-        return lines.join("\n").trim();
+        const hasContent = lines.length > 2;
+        return hasContent ? lines.join("\n").trim() : "";
     } catch {
         return "";
     }
@@ -327,7 +395,7 @@ async function loadStyleGuide(): Promise<string> {
 }
 
 type DraftGenerationResult =
-    | { ok: true; draft: string; filesTouchedManifestBlock: string }
+    | { ok: true; draft: string; ledger: FilesTouchedLedger }
     | { ok: false; error: string };
 
 function formatManifestOperations(file: FilesTouchedEntry): string {
@@ -394,10 +462,10 @@ function prependHandoverTitle(draft: string): string {
     return trimmedDraft.startsWith(titleLine) ? trimmedDraft : `${titleLine}\n\n${trimmedDraft}`;
 }
 
-function finalizeDraft(draft: string, manifestBlock: string): string {
+function finalizeDraft(draft: string, ledger: FilesTouchedLedger): string {
     const cleanedDraft = stripModelAuthoredFilesTouchedTail(draft);
     const titledDraft = prependHandoverTitle(cleanedDraft);
-    return `${titledDraft.trimEnd()}\n\n${manifestBlock}`;
+    return ledger.mode === "writerAndReader" ? `${titledDraft.trimEnd()}\n\n${ledger.block}` : titledDraft;
 }
 
 function createNonce(): string {
@@ -408,10 +476,10 @@ function buildHandoverInstructionPrompt(params: {
     purpose: string;
     styleGuide: string;
     priorCompactionsAddendum: string;
-    filesTouchedManifestBlock: string;
+    ledger: FilesTouchedLedger;
     nonce: string;
 }): string {
-    const { purpose, styleGuide, priorCompactionsAddendum, filesTouchedManifestBlock, nonce } = params;
+    const { purpose, styleGuide, priorCompactionsAddendum, ledger, nonce } = params;
 
     const parts: string[] = [];
 
@@ -429,10 +497,7 @@ function buildHandoverInstructionPrompt(params: {
     parts.push("- output only the final handover message in markdown");
     parts.push("- do not add a document title; the final handover will be titled by the system");
     parts.push("- make it high-signal and self-contained; the agent reading it in the new session will have near-zero context");
-    parts.push("- use the files-touched list below as factual input; it will be appended verbatim to the final handover draft");
-    parts.push("- mention in \"Mandatory reading\" only the subset that matters for continuation; do not restate the full list");
-    parts.push("- do not add a files-touched section, files modified section, files changed section, or any other exhaustive file inventory; the system will append the authoritative list verbatim");
-    parts.push("- do not duplicate the full list in prose");
+    parts.push(...FILES_TOUCHED_CONSTRAINTS[ledger.mode]);
     parts.push("");
     parts.push(`# Purpose\n${purpose.trim()}`);
     parts.push("");
@@ -442,8 +507,10 @@ function buildHandoverInstructionPrompt(params: {
         parts.push("");
     }
 
-    parts.push(filesTouchedManifestBlock.trim());
-    parts.push("");
+    if (ledger.mode !== "off") {
+        parts.push(ledger.block.trim());
+        parts.push("");
+    }
     parts.push(styleGuide.trim());
 
     return parts.join("\n").trim();
@@ -583,8 +650,10 @@ async function generateHandoverDraftViaAgent(params: {
     purpose: string;
     styleGuide: string;
     priorCompactionsAddendum: string;
+    filesTouchedMode: FilesTouchedMode;
+    collectFilesTouched: typeof collectFilesTouched;
 }): Promise<DraftGenerationResult> {
-    const { pi, ctx, purpose, styleGuide, priorCompactionsAddendum } = params;
+    const { pi, ctx, purpose, styleGuide, priorCompactionsAddendum, filesTouchedMode } = params;
 
     const ready = await waitForQuiescentSession(ctx);
     if (!ready) {
@@ -594,13 +663,14 @@ async function generateHandoverDraftViaAgent(params: {
         };
     }
 
-    const branchEntries = ctx.sessionManager.getBranch();
-
-    let filesTouchedManifestBlock: string;
+    let ledger: FilesTouchedLedger;
     try {
-        filesTouchedManifestBlock = renderFilesTouchedManifestBlock(
-            collectFilesTouched(branchEntries, ctx.cwd),
-        );
+        ledger = filesTouchedMode === "off"
+            ? { mode: "off" }
+            : {
+                mode: filesTouchedMode,
+                block: renderFilesTouchedManifestBlock(params.collectFilesTouched(ctx.sessionManager.getBranch(), ctx.cwd)),
+            };
     } catch (error) {
         return {
             ok: false,
@@ -616,7 +686,7 @@ async function generateHandoverDraftViaAgent(params: {
         purpose,
         styleGuide,
         priorCompactionsAddendum,
-        filesTouchedManifestBlock,
+        ledger,
         nonce,
     });
 
@@ -633,10 +703,13 @@ async function generateHandoverDraftViaAgent(params: {
         };
     }
 
-    return { ok: true, draft, filesTouchedManifestBlock };
+    return { ok: true, draft, ledger };
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (
+    pi: ExtensionAPI,
+    deps: HandoverDependencies = { configPath: CONFIG_PATH, collectFilesTouched },
+) {
     registerFilesTouchedTracking(pi);
     let pending: PendingAutoSubmit | null = null;
 
@@ -762,6 +835,15 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
+        // Loaded before drafting: an invalid files-touched setting must stop the handover, not fall back silently
+        let config: ExtensionConfig;
+        try {
+            config = await loadConfig(deps.configPath);
+        } catch (error) {
+            ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+            return;
+        }
+
         // Purpose is optional: if omitted, default to a simple continuation goal
         // (do not prompt, so `/handover` is a fast one-shot workflow)
         const purpose = args.trim() || "Continue from the current milestone/state with a clean child session and a rich rehydration message";
@@ -775,6 +857,8 @@ export default function (pi: ExtensionAPI) {
             purpose,
             styleGuide,
             priorCompactionsAddendum,
+            filesTouchedMode: config.includeFilesTouched,
+            collectFilesTouched: deps.collectFilesTouched,
         });
 
         if (!draftResult.ok) {
@@ -782,8 +866,7 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
-        const finalDraft = finalizeDraft(draftResult.draft, draftResult.filesTouchedManifestBlock);
-        const config = await loadConfig();
+        const finalDraft = finalizeDraft(draftResult.draft, draftResult.ledger);
 
         await writePendingHandoverDraft({
             previousSessionFile,

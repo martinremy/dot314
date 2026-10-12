@@ -1,3 +1,4 @@
 {
-  "autoSubmitSeconds": 10
+  "autoSubmitSeconds": 10,
+  "includeFilesTouched": "writer"
 }

@@ -1074,7 +1074,7 @@ describe("coordinator lazy portability orchestration", () => {
             const groundedOpenSession: GroundedPortableSummarizerOpener = (request, signal) =>
                 openGroundedPortableSummarizerSession(request, signal, {
                     collectFilesTouched: () => [],
-                    loadConfig: async () => parseConfig({ toolResultChars, includeFilesTouched: false }),
+                    loadConfig: async () => parseConfig({ toolResultChars, includeFilesTouched: "off" }),
                     loadCompactionPrompt: async () => "Keep the checkpoint concise",
                     complete: async (_model, context) => {
                         prompts.push(JSON.stringify(context));
@@ -2065,7 +2065,7 @@ describe("coordinator lazy portability orchestration", () => {
                 } satisfies AssistantMessage;
             },
             loadConfig: async () => ({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 toolResultChars: null,
                 presets: {},

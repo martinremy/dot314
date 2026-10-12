@@ -10,22 +10,22 @@ Borrowing heavily from [pasky/pi-amplike](https://github.com/pasky/pi-amplike) a
 - **Fork-from-first workflow (lineage-preserving)**: uses `ctx.fork(firstUserEntryId)` rather than creating an unrelated new session, so the fork lineage is preserved.
 - **Race-hardened draft extraction**: waits for a quiescent session (`ctx.isIdle()` + `!ctx.hasPendingMessages()`), embeds a per-run nonce in the generation prompt, and extracts the assistant message following that nonce-marked user entry.
 - **Structured continuation prompt**: uses a more opinionated handover prompt that separates verified status, decisions, surprises, rejected paths, observed facts vs inferences, mandatory reading, and concrete next steps, with guardrails against exhaustive file-list restatements
-- **Compaction-history addendum**: if present in the session history, prior compaction summaries from the current session JSONL are included in an addendum.
-- **Files touched list**: deterministically computes a files-touched block from the same branch-history logic as [`files-touched`](../files-touched.ts), including explicit read/write/edit/move/delete markers across native Pi tools, `rp`, and `rp_exec`, presents that to the handover-generating model for recall aid, and appends it to the child-session draft.
-- **User-editable overrides**: supports `config.json` (auto-submit countdown) and `prompt.md` (style guide) without editing TypeScript.
+- **Compaction-history addendum**: if present in the session history, prior compaction summaries from the current session JSONL are included in an addendum, without the files-touched lists that grounded-compaction may have appended to them.
+- **Files touched list**: deterministically computes a files-touched block from the same branch-history logic as [`files-touched`](../files-touched.ts), including explicit read/write/edit/move/delete markers across native Pi tools, `rp`, and `rp_exec`, presents that to the handover-generating model as a recall aid, and, when configured, also appends it to the child-session draft (see [Configuration](#configuration)).
+- **User-editable overrides**: supports `config.json` (auto-submit countdown and files-touched audience) and `prompt.md` (style guide) without editing TypeScript.
 - **Rewind integration (explicit + gated)**: when [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook) is installed, `handover` emits a `rewind:fork-preference` event requesting a conversation-only fork ("keep current files") for the fork it triggers.
 - **Designed to pair with `session-ask`**: because `/handover` creates a real fork (parentSession chain), the [`session-ask/`](../session-ask/) extension can (optionally, via its own config) inject a minimal "Fork lineage" hint into the system prompt after a fork, including the parent session path—so the agent can quickly call `session_ask`/`session_lineage` to consult parent history as needed.
 
 ## Features
 
-The files-touched list covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the extension warns and includes the confirmed operations in the handover. See [Files Touched coverage](../../packages/pi-files-touched/README.md#what-it-tracks) for supported commands and limits.
+The files-touched list covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the extension warns and includes the confirmed operations in the files-touched list. See [Files Touched coverage](../../packages/pi-files-touched/README.md#what-it-tracks) for supported commands and limits.
 
 - `/handover [purpose]`
   - purpose is optional (defaults to "continue from current milestone/state")
   - generates a handover draft using the **current session model** (no separate model selection)
-  - gives the drafting model a files-touched list derived from the same logic as [`files-touched`](../files-touched.ts)
+  - gives the drafting model a files-touched list derived from the same logic as [`files-touched`](../files-touched.ts), unless `includeFilesTouched` is `"off"`
   - forks from the **first user message** and switches into the child session
-  - pastes the handover draft into the child session editor with the same files-touched list appended verbatim
+  - pastes the handover draft into the child session editor, with the same files-touched list appended verbatim when `includeFilesTouched` is `"writerAndReader"`
   - optional auto-submit countdown (cancelled by typing or `Esc`; `Enter` submits normally)
 
 - Optional integration with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook)
@@ -71,6 +71,20 @@ Create `config.json` next to `index.ts` (see `config.json.example`):
 
 - `autoSubmitSeconds: 0` disables auto-submit entirely
 
+### Files-touched list (`includeFilesTouched`)
+
+The files-touched list records each file the parent session read, wrote, edited, moved, or deleted. The *writer* is the model that drafts the handover in the parent session, and the *reader* is the model in the child session that receives the draft.
+
+- `"writer"` (default): the writer gets the list as reference and is told to name the files that matter in the draft. The child draft contains no list.
+- `"writerAndReader"`: the writer gets the list, and the same list is appended verbatim to the child draft.
+- `"off"`: no list is built.
+
+```json
+{ "autoSubmitSeconds": 10, "includeFilesTouched": "writer" }
+```
+
+If `config.json` cannot be read or parsed, or `includeFilesTouched` has any other value (including `true` or `false`), `/handover` shows an error and stops before drafting.
+
 ### Prompt/style override (`prompt.md`)
 
 By default, the extension uses an embedded style guide.
@@ -85,11 +99,11 @@ You can start from:
 
 ## How it works
 
-1. Waits for the session to go quiescent, then snapshots the current branch history
-2. Builds a files-touched list from session tool-call/tool-result history using the same collector as `/files-touched`, including explicit `R/W/E/M/D` markers and best-effort bash-derived move/delete detection, then cleans up aliases for handover presentation
-3. Builds an instruction prompt ("generate a single rich handover / rehydration message…") + style guide + that files-touched block, explicitly telling the model not to emit its own exhaustive file list or title
-4. If compactions occured: adds a small **prior-compactions addendum** (verbatim compaction summaries from the session JSONL), capped for safety
+1. Loads `config.json` (stopping with an error if it is invalid), waits for the session to go quiescent, then snapshots the current branch history
+2. Unless `includeFilesTouched` is `"off"`, builds a files-touched list from session tool-call/tool-result history using the same collector as `/files-touched`, including explicit `R/W/E/M/D` markers and best-effort bash-derived move/delete detection, then cleans up aliases for handover presentation
+3. Builds an instruction prompt ("generate a single rich handover / rehydration message…") + style guide + that files-touched block (when built), telling the model not to emit its own exhaustive file list or title, and whether the list will be appended to the draft
+4. If compactions occurred: adds a small **prior-compactions addendum** (compaction summaries from the session JSONL, without their files-touched lists), capped for safety
 5. Sends that prompt as a normal user message (`pi.sendUserMessage(...)`) so the current session model produces the draft
 6. Waits for the assistant response and extracts the draft, including when generation takes longer than five minutes
 7. Finds the first user message entry ID and calls `ctx.fork(firstUserEntryId)`
-8. Normalizes the draft, prefixes a stable title, appends the same files-touched block, and starts the countdown (if enabled)
+8. Normalizes the draft, prefixes a stable title, appends the same files-touched block when `includeFilesTouched` is `"writerAndReader"`, and starts the countdown (if enabled)

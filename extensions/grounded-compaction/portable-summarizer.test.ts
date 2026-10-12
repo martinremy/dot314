@@ -11,6 +11,8 @@ import {
     buildSummaryUserPrompt,
     estimateInputTokens,
     openGroundedPortableSummarizerSession,
+    renderFilesTouchedManifestBlock,
+    type FilesTouchedLedger,
     type GroundedCompactionConfig,
     type GroundedPortableSummarizerDependencies,
 } from "./index.ts";
@@ -91,10 +93,11 @@ function thinkingEntry(level: string): SessionEntry {
 function createConfig(overrides: Partial<GroundedCompactionConfig> = {}): GroundedCompactionConfig {
     return {
         includeFilesTouched: {
-            inCompactionSummary: true,
-            inBranchSummary: true,
+            inCompactionSummary: "writerAndReader",
+            inBranchSummary: "writerAndReader",
         },
         defaultPreset: "current",
+        toolResultChars: null,
         presets: {},
         ...overrides,
     };
@@ -131,8 +134,8 @@ function createDependencies(
         collectFilesTouched: () => [],
         loadConfig: async () => createConfig({
             includeFilesTouched: {
-                inCompactionSummary: false,
-                inBranchSummary: true,
+                inCompactionSummary: "off",
+                inBranchSummary: "writerAndReader",
             },
         }),
         loadCompactionPrompt: async () => PROMPT_CONTRACT,
@@ -159,12 +162,17 @@ function createQuery(model = createModel()): GroundedPortableSummarizerQuery {
     };
 }
 
-function fixedPromptTokens(previousSummary: string | null, promptContract = PROMPT_CONTRACT): number {
+function fixedPromptTokens(
+    previousSummary: string | null,
+    promptContract = PROMPT_CONTRACT,
+    filesTouchedLedger: FilesTouchedLedger = { mode: "off" },
+): number {
     const emptySourcePrompt = buildSummaryUserPrompt({
         mode: "history",
         promptContract,
         serializedConversation: "",
         previousSummary: previousSummary ?? undefined,
+        filesTouchedLedger,
     });
     return estimateInputTokens(`${DEFAULT_SYSTEM_PROMPT}\n\n${emptySourcePrompt}`);
 }
@@ -764,12 +772,109 @@ describe("grounded portable summarizer capacity and execution", () => {
         assert.equal(collected.length, 2);
         assert.deepEqual(collected.map(({ entries }) => entries), [firstCoverage, expandedCoverage]);
         assert.deepEqual(collected.map(({ cwd }) => cwd), ["/workspace", "/workspace"]);
-        assert.equal(prompts.every((prompt) => !prompt.includes("old.ts") && !prompt.includes("before.ts")), true);
+        assert.equal(prompts.every((prompt) => !prompt.includes("old.ts") && !prompt.includes("stale.ts")), true);
+        assert.equal(prompts.slice(0, 2).every((prompt) => prompt.includes("R  before.ts") && !prompt.includes("later.ts")), true);
+        assert.match(prompts[2], /R  later\.ts/);
         assert.equal((first.summary.match(/## Files touched/g) ?? []).length, 1);
         assert.equal((repeated.summary.match(/## Files touched/g) ?? []).length, 1);
         assert.match(expanded.summary, /R  before\.ts/);
         assert.match(expanded.summary, /R  later\.ts/);
         assert.doesNotMatch(expanded.summary, /stale\.ts|old\.ts/);
+    });
+
+    it("writer mode gives the writer the coverage ledger and returns no ledger", async () => {
+        const coverage = [thinkingEntry("low")];
+        const collected: Array<readonly SessionEntry[]> = [];
+        const prompts: string[] = [];
+        const session = await openSession({
+            branchEntries: [...coverage, thinkingEntry("after-checkpoint")],
+            dependencies: createDependencies({
+                loadConfig: async () => createConfig({ includeFilesTouched: { inCompactionSummary: "writer", inBranchSummary: "off" } }),
+                collectFilesTouched: (entries) => {
+                    collected.push(entries);
+                    return entries.length === 1
+                        ? [{ path: "/workspace/kept.ts", displayPath: "kept.ts", operations: new Set(["edit"]), lastTimestamp: 1 }]
+                        : [{ path: "/workspace/later.ts", displayPath: "later.ts", operations: new Set(["edit"]), lastTimestamp: 2 }];
+                },
+                complete: async (_model, context) => {
+                    // SAFETY: each summary request is one user message whose first content part is the prompt text.
+                    prompts.push((context.messages[0].content[0] as { text: string }).text);
+                    return createAssistantResponse(
+                        "body\n\n---\n\n## Files touched (cumulative)\n"
+                        + "R=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nE  kept.ts\n```",
+                    );
+                },
+            }),
+        });
+
+        const result = await session.summarizeNext({
+            previousSummary: null,
+            sourceText: "source",
+            startOffset: 0,
+            coverageEntries: coverage,
+            signal: new AbortController().signal,
+        });
+
+        assert.deepEqual(collected, [coverage]);
+        assert.match(prompts[0], /## Cumulative files-touched reference/);
+        assert.match(prompts[0], /E  kept\.ts/);
+        assert.match(prompts[0], /will not be included in the summary/);
+        assert.doesNotMatch(prompts[0], /later\.ts/);
+        assert.equal(result.summary, "body");
+    });
+
+    it("budgets source capacity with the coverage ledger", async () => {
+        const files: FilesTouchedEntry[] = Array.from({ length: 40 }, (_, index) => ({
+            path: `/workspace/src/file-${index}.ts`,
+            displayPath: `src/file-${index}.ts`,
+            operations: new Set(["edit"]),
+            lastTimestamp: index,
+        }));
+        const prompts: string[] = [];
+        const ledgerOverhead = fixedPromptTokens(null, PROMPT_CONTRACT, {
+            mode: "writer",
+            block: renderFilesTouchedManifestBlock(files, "## Files touched (cumulative)"),
+        }) - fixedPromptTokens(null);
+        const model = createCapacityModel(ledgerOverhead + 50);
+        const sessionFor = (mode: "off" | "writer") => openSession({
+            model,
+            dependencies: createDependencies({
+                loadConfig: async () => createConfig({ includeFilesTouched: { inCompactionSummary: mode, inBranchSummary: "off" } }),
+                collectFilesTouched: () => files,
+                complete: async (_model, context) => {
+                    // SAFETY: each summary request is one user message whose first content part is the prompt text.
+                    prompts.push((context.messages[0].content[0] as { text: string }).text);
+                    return createAssistantResponse();
+                },
+            }),
+        });
+        const request = {
+            previousSummary: null,
+            sourceText: "x ".repeat(2000),
+            startOffset: 0,
+            coverageEntries: [],
+            signal: new AbortController().signal,
+        };
+
+        const withoutLedger = await (await sessionFor("off")).summarizeNext(request);
+        const withLedger = await (await sessionFor("writer")).summarizeNext(request);
+
+        assert.ok(withLedger.endOffset < withoutLedger.endOffset);
+        assert.match(prompts[1], /src\/file-39\.ts/);
+    });
+
+    it("records the compaction audience in portable prompt provenance", async () => {
+        const fingerprintFor = async (inCompactionSummary: "writer" | "writerAndReader", inBranchSummary: "off" | "writer") => (
+            await openSession({
+                dependencies: createDependencies({
+                    loadConfig: async () => createConfig({ includeFilesTouched: { inCompactionSummary, inBranchSummary } }),
+                }),
+            })
+        ).descriptor.promptFingerprint;
+
+        assert.equal(await fingerprintFor("writer", "off"), await fingerprintFor("writer", "off"));
+        assert.equal(await fingerprintFor("writer", "off"), await fingerprintFor("writer", "writer"));
+        assert.notEqual(await fingerprintFor("writer", "off"), await fingerprintFor("writerAndReader", "off"));
     });
 
     it("omits manifests when disabled and fails collection before provider dispatch", async () => {
@@ -813,6 +918,22 @@ describe("grounded portable summarizer capacity and execution", () => {
             signal: new AbortController().signal,
         }), /collection failed/);
         assert.equal(completionCalls, 1);
+
+        const ledgerOnly = await openSession({
+            dependencies: createDependencies({
+                loadConfig: async () => createConfig(),
+                complete: async () => createAssistantResponse(
+                    "## Files touched (cumulative)\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nR  a.ts\n```",
+                ),
+            }),
+        });
+        await assert.rejects(ledgerOnly.summarizeNext({
+            previousSummary: null,
+            sourceText: "source",
+            startOffset: 0,
+            coverageEntries: [],
+            signal: new AbortController().signal,
+        }), /Portable summarization returned no summary body/);
     });
 
     it("surfaces provider errors, output limits, and empty output", async () => {

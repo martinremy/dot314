@@ -16,7 +16,6 @@ import {
 import type { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
     convertToLlm,
-    findTurnStartIndex,
     type ExtensionAPI,
     type ExtensionContext,
     type SessionBeforeCompactEvent,
@@ -25,6 +24,8 @@ import {
     type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
+import { Type, type Static } from "typebox";
+import { Check } from "typebox/value";
 import { collectFilesTouched, registerFilesTouchedTracking, type FilesTouchedEntry } from "../_shared/files-touched-core.ts";
 import { serializeConversationForCompaction } from "../_shared/compaction-serialization.ts";
 import {
@@ -40,10 +41,20 @@ export { queryGroundedCompactionDelegation } from "./registration.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+const FilesTouchedModeSchema = Type.Union([Type.Literal("off"), Type.Literal("writer"), Type.Literal("writerAndReader")]);
+
+/** Who sees the files-touched manifest: nobody, the summary writer only, or the writer and the reader of the saved summary */
+export type FilesTouchedMode = Static<typeof FilesTouchedModeSchema>;
+
 export interface IncludeFilesTouchedSettings {
-    inCompactionSummary: boolean;
-    inBranchSummary: boolean;
+    inCompactionSummary: FilesTouchedMode;
+    inBranchSummary: FilesTouchedMode;
 }
+
+/** File activity given to a summary's writer; only "writerAndReader" also adds it to the saved text */
+export type FilesTouchedLedger =
+    | Readonly<{ mode: "off" }>
+    | Readonly<{ mode: "writer" | "writerAndReader"; block: string }>;
 
 type JsonObject = Record<string, unknown>;
 type SummaryMode = "history" | "turn-prefix";
@@ -80,14 +91,6 @@ export interface ResolvedSummarizer {
 export interface GroundedCompactionDetails {
     model: string;
     thinkingLevel?: ThinkingLevel;
-}
-
-export interface SummaryEntrySpans {
-    boundaryStart: number;
-    firstKeptEntryIndex: number;
-    turnStartIndex: number;
-    historyEntries: SessionEntry[];
-    turnPrefixEntries: SessionEntry[];
 }
 
 export interface PresetMatchResult {
@@ -167,12 +170,6 @@ type SummaryCapacityIssue =
         contextWindow: number;
     }>;
 
-type SummaryArtifacts = {
-    historyManifestBlock?: string;
-    turnPrefixManifestBlock?: string;
-    wholeBranchManifestBlock?: string;
-};
-
 type RunDeps = {
     /** Supplied by tests; ordinary compaction uses the session's model registry. */
     complete?: typeof completeSimple;
@@ -235,7 +232,7 @@ const CONFIG_PATH = path.join(EXTENSION_DIR, "config.json");
 const COMPACTION_PROMPT_PATH = path.join(EXTENSION_DIR, "compaction-prompt.md");
 const BRANCH_SUMMARY_PROMPT_PATH = path.join(EXTENSION_DIR, "branch-summary-prompt.md");
 const CURRENT_PRESET_SENTINEL = "current";
-const PORTABLE_SUMMARIZER_PROMPT_VERSION = 1;
+const PORTABLE_SUMMARIZER_PROMPT_VERSION = 2;
 export const PORTABLE_SUMMARY_MAX_OUTPUT_TOKENS = 16_384;
 // Portable transcripts contain code and tool output, which tokenize more densely than ordinary prose.
 const PORTABLE_SOURCE_CHARACTERS_PER_TOKEN = 2;
@@ -246,9 +243,25 @@ const TURN_CONTEXT_HEADING = "**Turn Context (split turn):**";
 const TURN_CONTEXT_DISCLAIMER = "_This section summarizes the early part of the current split turn. It is more recent than the sections above it; where they conflict, prefer this section. The kept conversation after this summary is more recent still and supersedes both._";
 
 const DEFAULT_INCLUDE_FILES_TOUCHED_SETTINGS: IncludeFilesTouchedSettings = {
-    inCompactionSummary: true,
-    inBranchSummary: true,
+    inCompactionSummary: "writer",
+    inBranchSummary: "writer",
 };
+const FILES_TOUCHED_MODES_TEXT = '"off", "writer", or "writerAndReader"';
+const FILES_TOUCHED_MOVE_GUIDANCE = "For moves established by the conversation, use the ledger's final canonical path for continuation references; retain former paths only to explain the move, relevant history, or an unresolved discrepancy. Do not infer a source-to-destination mapping from the ledger alone.";
+const COMPACTION_LEDGER_INSTRUCTIONS = [
+    "This cumulative ledger records file activity across the supplied branch coverage and may include activity outside this request's serialized span.",
+    "Use it only as a recall aid for recorded activity; it does not establish current filesystem state or event order.",
+    "Keep temporal claims grounded in the serialized span and any previous summary, and do not attribute an operation to this span solely because it appears in the ledger.",
+    "Name the exact paths that matter for continuation in the applicable requested sections, especially relevant writes, edits, moves, and deletions.",
+    "When the requested structure includes Mandatory reading, reserve it for files the next agent must open before the immediate next action.",
+    FILES_TOUCHED_MOVE_GUIDANCE,
+].join(" ");
+const COMPACTION_LEDGER_AUDIENCE = {
+    writer: "This ledger is reference material for you only and will not be included in the summary the next agent receives. Do not reproduce it, add an exhaustive file inventory, or refer the reader to a files-touched list. Include continuation-relevant file references directly in the summary body.",
+    writerAndReader: "The system will append this cumulative ledger verbatim after the completed summary. Do not reproduce it or add another exhaustive file inventory in your output. Include continuation-relevant file references directly in the summary body so the narrative remains self-contained.",
+} satisfies Record<Exclude<FilesTouchedMode, "off">, string>;
+const BRANCH_LEDGER_GUIDANCE = "Use this block only as evidence of recorded file activity in the branch entries being summarized. It does not establish current filesystem state or event order. Name the exact paths needed to continue this branch's work in the applicable sections, especially relevant writes, edits, moves, and deletions. For moves established by the conversation, use the final canonical path for continuation references; mention a former path only when needed to explain the move, relevant history, or an unresolved discrepancy. Do not infer a source-to-destination mapping from the ledger alone.";
+const BRANCH_LEDGER_REFERENCE_ONLY = "The included files-touched block is factual reference for you only. Do not reproduce it, add an exhaustive file inventory, or refer the reader to a files-touched list. Include continuation-relevant file references directly in the summary body.";
 
 export const DEFAULT_CONFIG: GroundedCompactionConfig = {
     includeFilesTouched: DEFAULT_INCLUDE_FILES_TOUCHED_SETTINGS,
@@ -379,20 +392,12 @@ function normalizeOptionalText(value?: string): string | undefined {
     return trimmed || undefined;
 }
 
-function expectBoolean(value: unknown, key: string): boolean {
-    if (typeof value !== "boolean") {
-        throw new Error(`Invalid grounded-compaction config: ${key} must be a boolean`);
-    }
-
-    return value;
-}
-
 function parseIncludeFilesTouchedSettings(value: unknown): IncludeFilesTouchedSettings {
     if (value === undefined) {
         return structuredClone(DEFAULT_INCLUDE_FILES_TOUCHED_SETTINGS);
     }
 
-    if (typeof value === "boolean") {
+    if (Check(FilesTouchedModeSchema, value)) {
         return {
             inCompactionSummary: value,
             inBranchSummary: value,
@@ -401,14 +406,19 @@ function parseIncludeFilesTouchedSettings(value: unknown): IncludeFilesTouchedSe
 
     if (!isObject(value)) {
         throw new Error(
-            "Invalid grounded-compaction config: includeFilesTouched must be a boolean or an object with inCompactionSummary and inBranchSummary",
+            `Invalid grounded-compaction config: includeFilesTouched must be ${FILES_TOUCHED_MODES_TEXT}, or an object with inCompactionSummary and inBranchSummary`,
         );
     }
 
-    return {
-        inCompactionSummary: expectBoolean(value.inCompactionSummary, "includeFilesTouched.inCompactionSummary"),
-        inBranchSummary: expectBoolean(value.inBranchSummary, "includeFilesTouched.inBranchSummary"),
-    };
+    const { inCompactionSummary, inBranchSummary } = value;
+    if (!Check(FilesTouchedModeSchema, inCompactionSummary)) {
+        throw new Error(`Invalid grounded-compaction config: includeFilesTouched.inCompactionSummary must be ${FILES_TOUCHED_MODES_TEXT}`);
+    }
+    if (!Check(FilesTouchedModeSchema, inBranchSummary)) {
+        throw new Error(`Invalid grounded-compaction config: includeFilesTouched.inBranchSummary must be ${FILES_TOUCHED_MODES_TEXT}`);
+    }
+
+    return { inCompactionSummary, inBranchSummary };
 }
 
 export function parseConfig(value: unknown): GroundedCompactionConfig {
@@ -670,78 +680,6 @@ export function getEffectiveThinkingLevel(branchEntries: SessionEntry[]): Thinki
     return thinkingLevel;
 }
 
-export function findLatestCompactionIndex(branchEntries: SessionEntry[]): number {
-    for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
-        if (branchEntries[index].type === "compaction") {
-            return index;
-        }
-    }
-
-    return -1;
-}
-
-function findEntryIndexById(branchEntries: SessionEntry[], id: string): number {
-    return branchEntries.findIndex((entry) => entry.id === id);
-}
-
-function findCompactionBoundaryStart(branchEntries: SessionEntry[]): number {
-    // Match Pi stock repeated-compaction semantics: resume from the previous kept boundary,
-    // not from the compaction entry itself
-    const prevCompactionIndex = findLatestCompactionIndex(branchEntries);
-    if (prevCompactionIndex < 0) {
-        return 0;
-    }
-
-    const prevCompaction = branchEntries[prevCompactionIndex];
-    if (prevCompaction.type !== "compaction") {
-        return prevCompactionIndex + 1;
-    }
-
-    const firstKeptEntryIndex = findEntryIndexById(branchEntries, prevCompaction.firstKeptEntryId);
-    return firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
-}
-
-export function deriveSummaryEntrySpans(params: {
-    branchEntries: SessionEntry[];
-    firstKeptEntryId: string;
-    isSplitTurn: boolean;
-}): SummaryEntrySpans {
-    const { branchEntries, firstKeptEntryId, isSplitTurn } = params;
-    const boundaryStart = findCompactionBoundaryStart(branchEntries);
-    const firstKeptEntryIndex = findEntryIndexById(branchEntries, firstKeptEntryId);
-
-    if (firstKeptEntryIndex < 0) {
-        throw new Error(`Could not find first kept entry '${firstKeptEntryId}' in branch entries`);
-    }
-
-    if (firstKeptEntryIndex < boundaryStart) {
-        throw new Error("Invalid compaction boundary: first kept entry is before the summary boundary");
-    }
-
-    if (!isSplitTurn) {
-        return {
-            boundaryStart,
-            firstKeptEntryIndex,
-            turnStartIndex: -1,
-            historyEntries: branchEntries.slice(boundaryStart, firstKeptEntryIndex),
-            turnPrefixEntries: [],
-        };
-    }
-
-    const turnStartIndex = findTurnStartIndex(branchEntries, firstKeptEntryIndex - 1, boundaryStart);
-    if (turnStartIndex < boundaryStart) {
-        throw new Error("Could not recover split-turn boundary from branch entries");
-    }
-
-    return {
-        boundaryStart,
-        firstKeptEntryIndex,
-        turnStartIndex,
-        historyEntries: branchEntries.slice(boundaryStart, turnStartIndex),
-        turnPrefixEntries: branchEntries.slice(turnStartIndex, firstKeptEntryIndex),
-    };
-}
-
 export function formatManifestOperations(file: FilesTouchedEntry): string {
     const operations: string[] = [];
     if (file.operations.has("read")) operations.push("R");
@@ -767,16 +705,13 @@ export function renderFilesTouchedManifestBlock(files: FilesTouchedEntry[], head
     return lines.join("\n");
 }
 
-function renderFinalFilesTouchedManifestBlock(files: FilesTouchedEntry[]): string {
-    return renderFilesTouchedManifestBlock(files, FINAL_FILES_TOUCHED_HEADING);
-}
-
 export function stripGroundedCompactionManifestTail(text?: string): string | undefined {
     if (!text?.trim()) {
         return undefined;
     }
 
-    const pattern = /\n{2,}(?:---\n\n)?## Files touched(?: \(cumulative\))?\nR=read, W=write, E=edit, M=move\/rename, D=delete\n\n```text\n[\s\S]*?\n```\s*$/;
+    // One fenced block per repetition, so a match never crosses an earlier fence; `+` removes adjacent trailing ledgers
+    const pattern = /(?:(?:^|\n{2,})(?:---\n\n)?## Files touched(?: \(cumulative\))?\nR=read, W=write, E=edit, M=move\/rename, D=delete\n\n```text\n(?:(?!\n```)[\s\S])*\n```)+\s*$/;
     const stripped = text.trimEnd().replace(pattern, "").trimEnd();
     return stripped || undefined;
 }
@@ -895,7 +830,7 @@ export function buildSummaryUserPrompt(params: {
     serializedConversation: string;
     previousSummary?: string;
     focusText?: string;
-    filesTouchedManifestBlock?: string;
+    filesTouchedLedger: FilesTouchedLedger;
     splitTurn?: boolean;
 }): string {
     const sections: string[] = [];
@@ -948,13 +883,14 @@ export function buildSummaryUserPrompt(params: {
         );
     }
 
-    if (params.filesTouchedManifestBlock) {
+    if (params.filesTouchedLedger.mode !== "off") {
         sections.push(
             [
-                "## Files touched for this summarized span",
-                "Use this block only for recorded file activity. It may canonicalize moved paths and does not establish current filesystem state or event order. Do not restate it exhaustively.",
+                "## Cumulative files-touched reference",
+                COMPACTION_LEDGER_INSTRUCTIONS,
+                COMPACTION_LEDGER_AUDIENCE[params.filesTouchedLedger.mode],
                 "",
-                params.filesTouchedManifestBlock,
+                params.filesTouchedLedger.block,
             ].join("\n"),
         );
     }
@@ -967,15 +903,11 @@ export function buildSummaryUserPrompt(params: {
 export function buildBranchSummaryInstructions(params: {
     promptContract?: string;
     focusText?: string;
-    filesTouchedManifestBlock?: string;
+    filesTouchedLedger: FilesTouchedLedger;
 }): { customInstructions: string; replaceInstructions: boolean } | undefined {
     const promptContract = normalizeOptionalText(params.promptContract);
     const focusText = normalizeOptionalText(params.focusText);
-    const filesTouchedManifestBlock = normalizeOptionalText(params.filesTouchedManifestBlock);
-
-    if (!promptContract && !filesTouchedManifestBlock) {
-        return undefined;
-    }
+    const ledger = params.filesTouchedLedger;
 
     if (promptContract) {
         const sections = [promptContract];
@@ -991,14 +923,19 @@ export function buildBranchSummaryInstructions(params: {
             );
         }
 
-        if (filesTouchedManifestBlock) {
+        if (ledger.mode === "writerAndReader") {
             sections.push(
                 [
                     "## Authoritative files touched",
                     "The included files-touched block is authoritative. Reproduce it verbatim in the summary body. Do not change its heading, legend, ordering, spacing, or fenced block contents.",
+                    BRANCH_LEDGER_GUIDANCE,
                     "",
-                    filesTouchedManifestBlock,
+                    ledger.block,
                 ].join("\n"),
+            );
+        } else if (ledger.mode === "writer") {
+            sections.push(
+                ["## Files touched reference", BRANCH_LEDGER_GUIDANCE, BRANCH_LEDGER_REFERENCE_ONLY, "", ledger.block].join("\n"),
             );
         }
 
@@ -1008,8 +945,14 @@ export function buildBranchSummaryInstructions(params: {
         };
     }
 
+    if (ledger.mode === "off") {
+        return undefined;
+    }
+
     const sections = [
-        "Also include the authoritative files-touched block below while preserving the stock branch-summary structure.",
+        ledger.mode === "writerAndReader"
+            ? "Also include the authoritative files-touched block below while preserving the stock branch-summary structure."
+            : "Use the files-touched block below as reference while preserving the stock branch-summary structure.",
     ];
 
     if (focusText) {
@@ -1023,9 +966,14 @@ export function buildBranchSummaryInstructions(params: {
 
     sections.push(
         [
-            "Authoritative files touched: reproduce this block verbatim in the summary body. Do not change its heading, legend, ordering, spacing, or fenced block contents.",
+            ...(ledger.mode === "writerAndReader"
+                ? [
+                    "Authoritative files touched: reproduce this block verbatim in the summary body. Do not change its heading, legend, ordering, spacing, or fenced block contents.",
+                    BRANCH_LEDGER_GUIDANCE,
+                ]
+                : [BRANCH_LEDGER_GUIDANCE, BRANCH_LEDGER_REFERENCE_ONLY]),
             "",
-            filesTouchedManifestBlock,
+            ledger.block,
         ].join("\n"),
     );
 
@@ -1045,7 +993,7 @@ function prepareSummaryRequest(params: {
     serializedConversation: string;
     previousSummary?: string;
     focusText?: string;
-    filesTouchedManifestBlock?: string;
+    filesTouchedLedger: FilesTouchedLedger;
     splitTurn?: boolean;
 }): PreparedSummaryRequest {
     const userPrompt = buildSummaryUserPrompt(params);
@@ -1247,12 +1195,14 @@ async function executePreparedSummaryRequest(params: {
     return (await executePreparedSummaryRequestResult(params, deps)).summary;
 }
 
-function createPortablePromptFingerprint(promptContract: string): string {
+function createPortablePromptFingerprint(promptContract: string, filesTouchedMode: FilesTouchedMode): string {
     return createHash("sha256")
         .update(`grounded-compaction:portable-prompt:v${PORTABLE_SUMMARIZER_PROMPT_VERSION}\0`)
         .update(DEFAULT_SYSTEM_PROMPT)
         .update("\0")
         .update(promptContract)
+        .update("\0")
+        .update(filesTouchedMode)
         .digest("hex");
 }
 
@@ -1388,10 +1338,9 @@ export async function openGroundedPortableSummarizerSession(
         thinkingLevel: summarizer.reasoningLevel ?? null,
         contextWindow,
         maxOutputTokens,
-        promptFingerprint: createPortablePromptFingerprint(promptContract),
+        promptFingerprint: createPortablePromptFingerprint(promptContract, config.includeFilesTouched.inCompactionSummary),
     } satisfies GroundedPortableSummarizerSession["descriptor"];
-    let cachedCoverageEntries: readonly SessionEntry[] | undefined;
-    let cachedManifestBlock: string | undefined;
+    let ledgerCache: { coverageEntries: readonly SessionEntry[]; ledger: FilesTouchedLedger } | undefined;
 
     return {
         descriptor,
@@ -1400,24 +1349,31 @@ export async function openGroundedPortableSummarizerSession(
             validatePortableSummaryRequest(summaryRequest);
             if (summaryRequest.signal.aborted) throw new CompactionAbortedError();
 
-            if (
-                config.includeFilesTouched.inCompactionSummary
-                && cachedCoverageEntries !== summaryRequest.coverageEntries
-            ) {
-                const files = deps.collectFilesTouched([...summaryRequest.coverageEntries], request.context.cwd);
-                cachedCoverageEntries = summaryRequest.coverageEntries;
-                cachedManifestBlock = renderFinalFilesTouchedManifestBlock(files);
+            // Coverage runs through the checkpoint; later branch activity must not shape a reusable checkpoint summary
+            if (ledgerCache?.coverageEntries !== summaryRequest.coverageEntries) {
+                ledgerCache = {
+                    coverageEntries: summaryRequest.coverageEntries,
+                    ledger: buildFilesTouchedLedger({
+                        mode: config.includeFilesTouched.inCompactionSummary,
+                        entries: [...summaryRequest.coverageEntries],
+                        cwd: request.context.cwd,
+                        heading: FINAL_FILES_TOUCHED_HEADING,
+                        collectFilesTouchedImpl: deps.collectFilesTouched,
+                    }),
+                };
             }
+            const ledger = ledgerCache.ledger;
             const previousSummary = stripGroundedCompactionManifestTail(
                 summaryRequest.previousSummary ?? undefined,
             );
-            const emptySourcePrompt = buildSummaryUserPrompt({
+            const buildPrompt = (serializedConversation: string) => buildSummaryUserPrompt({
                 mode: "history",
                 promptContract,
-                serializedConversation: "",
+                serializedConversation,
                 previousSummary,
+                filesTouchedLedger: ledger,
             });
-            const fixedPromptTokens = estimateInputTokens(`${DEFAULT_SYSTEM_PROMPT}\n\n${emptySourcePrompt}`);
+            const fixedPromptTokens = estimateInputTokens(`${DEFAULT_SYSTEM_PROMPT}\n\n${buildPrompt("")}`);
             const maxSourceCharacters = (
                 contextWindow - maxOutputTokens - fixedPromptTokens
             ) * PORTABLE_SOURCE_CHARACTERS_PER_TOKEN;
@@ -1434,12 +1390,7 @@ export async function openGroundedPortableSummarizerSession(
             if (endOffset <= summaryRequest.startOffset) {
                 throw new Error("Portable summary capacity cannot fit one UTF-16-safe source character");
             }
-            const userPrompt = buildSummaryUserPrompt({
-                mode: "history",
-                promptContract,
-                serializedConversation: summaryRequest.sourceText.slice(summaryRequest.startOffset, endOffset),
-                previousSummary,
-            });
+            const userPrompt = buildPrompt(summaryRequest.sourceText.slice(summaryRequest.startOffset, endOffset));
             const result = await executePortableSummaryRequestResult(
                 {
                     request: {
@@ -1457,7 +1408,7 @@ export async function openGroundedPortableSummarizerSession(
             const summaryBody = stripGroundedCompactionManifestTail(result.summary);
             if (!summaryBody) throw new Error("Portable summarization returned no summary body");
             return {
-                summary: appendWholeBranchManifest(summaryBody, cachedManifestBlock),
+                summary: appendReaderLedger(summaryBody, ledger),
                 endOffset,
                 usage: result.usage,
             };
@@ -1465,12 +1416,12 @@ export async function openGroundedPortableSummarizerSession(
     };
 }
 
-function appendWholeBranchManifest(summary: string, manifestBlock?: string): string {
-    if (!manifestBlock) {
+function appendReaderLedger(summary: string, ledger: FilesTouchedLedger): string {
+    if (ledger.mode !== "writerAndReader") {
         return summary.trim();
     }
 
-    return `${summary.trimEnd()}\n\n---\n\n${manifestBlock}`;
+    return `${summary.trimEnd()}\n\n---\n\n${ledger.block}`;
 }
 
 function mergeSplitTurnSummary(historySummary: string | undefined, turnPrefixSummary: string): string {
@@ -1483,29 +1434,21 @@ function mergeSplitTurnSummary(historySummary: string | undefined, turnPrefixSum
     return `${normalizedHistory}\n\n---\n\n${splitTurnSection}`;
 }
 
-function buildSummaryArtifacts(params: {
-    config: GroundedCompactionConfig;
-    branchEntries: SessionEntry[];
-    spans: SummaryEntrySpans;
-    cwd?: string | null;
+/** Collects and renders the ledger once for an enabled mode; "off" collects nothing. Collector errors propagate */
+function buildFilesTouchedLedger(params: {
+    mode: FilesTouchedMode;
+    entries: SessionEntry[];
+    cwd: string | null | undefined;
+    heading: string;
     collectFilesTouchedImpl: typeof collectFilesTouched;
-}): SummaryArtifacts {
-    if (!params.config.includeFilesTouched.inCompactionSummary) {
-        return {};
+}): FilesTouchedLedger {
+    if (params.mode === "off") {
+        return { mode: "off" };
     }
 
-    const historyFiles = params.spans.historyEntries.length > 0
-        ? params.collectFilesTouchedImpl(params.spans.historyEntries, params.cwd)
-        : undefined;
-    const turnFiles = params.spans.turnPrefixEntries.length > 0
-        ? params.collectFilesTouchedImpl(params.spans.turnPrefixEntries, params.cwd)
-        : undefined;
-    const wholeBranchFiles = params.collectFilesTouchedImpl(params.branchEntries, params.cwd);
-
     return {
-        historyManifestBlock: historyFiles ? renderFilesTouchedManifestBlock(historyFiles) : undefined,
-        turnPrefixManifestBlock: turnFiles ? renderFilesTouchedManifestBlock(turnFiles) : undefined,
-        wholeBranchManifestBlock: renderFinalFilesTouchedManifestBlock(wholeBranchFiles),
+        mode: params.mode,
+        block: renderFilesTouchedManifestBlock(params.collectFilesTouchedImpl(params.entries, params.cwd), params.heading),
     };
 }
 
@@ -1515,9 +1458,9 @@ function prepareSummaryBatch(params: {
     toolResultChars: number | null;
     focusText?: string;
     previousSummary?: string;
-    summaryArtifacts: SummaryArtifacts;
+    filesTouchedLedger: FilesTouchedLedger;
 }): PreparedSummaryBatch {
-    const { event, promptContract, toolResultChars, focusText, previousSummary, summaryArtifacts } = params;
+    const { event, promptContract, toolResultChars, focusText, previousSummary, filesTouchedLedger } = params;
     if (event.preparation.isSplitTurn && event.preparation.turnPrefixMessages.length > 0) {
         const history = event.preparation.messagesToSummarize.length > 0
             ? prepareSummaryRequest({
@@ -1529,7 +1472,7 @@ function prepareSummaryBatch(params: {
                 ),
                 previousSummary,
                 focusText,
-                filesTouchedManifestBlock: summaryArtifacts.historyManifestBlock,
+                filesTouchedLedger,
                 splitTurn: true,
             })
             : undefined;
@@ -1541,7 +1484,7 @@ function prepareSummaryBatch(params: {
                 toolResultChars,
             ),
             focusText,
-            filesTouchedManifestBlock: summaryArtifacts.turnPrefixManifestBlock,
+            filesTouchedLedger,
         });
         return {
             kind: "split-turn",
@@ -1562,7 +1505,7 @@ function prepareSummaryBatch(params: {
             ),
             previousSummary,
             focusText,
-            filesTouchedManifestBlock: summaryArtifacts.historyManifestBlock,
+            filesTouchedLedger,
         }),
     };
 }
@@ -1570,30 +1513,35 @@ function prepareSummaryBatch(params: {
 async function executePreflightedSummaryBatch(
     plan: PreflightedSummaryBatch,
     signal: AbortSignal,
-    wholeBranchManifestBlock: string | undefined,
+    filesTouchedLedger: FilesTouchedLedger,
     deps: SummaryExecutionDeps,
 ): Promise<string> {
-    const execute = (request: PreparedSummaryRequest) => executePreparedSummaryRequest(
-        {
-            request,
-            summarizer: plan.summarizer,
-            maxOutputTokens: plan.capacity.maxOutputTokens,
-            signal,
-        },
-        deps,
-    );
+    // Each output is stripped before merging so a copied ledger cannot survive inside the merged summary
+    const execute = async (request: PreparedSummaryRequest) => {
+        const summaryBody = stripGroundedCompactionManifestTail(await executePreparedSummaryRequest(
+            {
+                request,
+                summarizer: plan.summarizer,
+                maxOutputTokens: plan.capacity.maxOutputTokens,
+                signal,
+            },
+            deps,
+        ));
+        if (!summaryBody) throw new Error("Summarization returned no summary body");
+        return summaryBody;
+    };
 
     if (plan.batch.kind === "history-only") {
-        return appendWholeBranchManifest(await execute(plan.batch.history), wholeBranchManifestBlock);
+        return appendReaderLedger(await execute(plan.batch.history), filesTouchedLedger);
     }
 
     const [historySummary, turnPrefixSummary] = await Promise.all([
         plan.batch.history ? execute(plan.batch.history) : Promise.resolve(plan.batch.carriedHistorySummary),
         execute(plan.batch.turnPrefix),
     ]);
-    return appendWholeBranchManifest(
+    return appendReaderLedger(
         mergeSplitTurnSummary(historySummary, turnPrefixSummary),
-        wholeBranchManifestBlock,
+        filesTouchedLedger,
     );
 }
 
@@ -1722,20 +1670,21 @@ export async function runGroundedBranchSummaryAugmentation(
         const config = await deps.loadConfig(EXTENSION_DIR);
         const promptContract = await deps.loadBranchSummaryPrompt(EXTENSION_DIR);
 
-        if (!promptContract && !config.includeFilesTouched.inBranchSummary) {
+        const mode = config.includeFilesTouched.inBranchSummary;
+        if (!promptContract && mode === "off") {
             return undefined;
         }
-
-        const filesTouchedManifestBlock = config.includeFilesTouched.inBranchSummary
-            ? renderFilesTouchedManifestBlock(
-                deps.collectFilesTouched(event.preparation.entriesToSummarize, ctx.cwd),
-            )
-            : undefined;
 
         return buildBranchSummaryInstructions({
             promptContract,
             focusText: event.preparation.customInstructions,
-            filesTouchedManifestBlock,
+            filesTouchedLedger: buildFilesTouchedLedger({
+                mode,
+                entries: event.preparation.entriesToSummarize,
+                cwd: ctx.cwd,
+                heading: FILES_TOUCHED_HEADING,
+                collectFilesTouchedImpl: deps.collectFilesTouched,
+            }),
         });
     } catch (error) {
         if (isSignalAborted(event.signal)) {
@@ -1768,16 +1717,11 @@ export async function runGroundedCompaction(
         };
         const promptContract = await deps.loadCompactionPrompt(EXTENSION_DIR);
         const parsedInstructions = parseCompactInstructions(event.customInstructions);
-        const spans = deriveSummaryEntrySpans({
-            branchEntries: event.branchEntries,
-            firstKeptEntryId: event.preparation.firstKeptEntryId,
-            isSplitTurn: event.preparation.isSplitTurn,
-        });
-        const summaryArtifacts = buildSummaryArtifacts({
-            config,
-            branchEntries: event.branchEntries,
-            spans,
+        const filesTouchedLedger = buildFilesTouchedLedger({
+            mode: config.includeFilesTouched.inCompactionSummary,
+            entries: event.branchEntries,
             cwd: ctx.cwd,
+            heading: FINAL_FILES_TOUCHED_HEADING,
             collectFilesTouchedImpl: deps.collectFilesTouched,
         });
         const previousSummary = stripGroundedCompactionManifestTail(event.preparation.previousSummary);
@@ -1787,7 +1731,7 @@ export async function runGroundedCompaction(
             toolResultChars: config.toolResultChars,
             focusText: parsedInstructions.focusText,
             previousSummary,
-            summaryArtifacts,
+            filesTouchedLedger,
         });
         const reserveTokens = event.preparation.settings.reserveTokens;
 
@@ -1821,7 +1765,7 @@ export async function runGroundedCompaction(
                 const summary = await executePreflightedSummaryBatch(
                     plan,
                     event.signal,
-                    summaryArtifacts.wholeBranchManifestBlock,
+                    filesTouchedLedger,
                     summaryDeps,
                 );
                 return buildSuccessResult(event, summary, summarizer);
@@ -1877,7 +1821,7 @@ export async function runGroundedCompaction(
             const summary = await executePreflightedSummaryBatch(
                 route.plan,
                 event.signal,
-                summaryArtifacts.wholeBranchManifestBlock,
+                filesTouchedLedger,
                 summaryDeps,
             );
             return buildSuccessResult(event, summary, route.plan.summarizer);

@@ -20,7 +20,6 @@ import {
     DEFAULT_SYSTEM_PROMPT,
     buildBranchSummaryInstructions,
     buildSummaryUserPrompt,
-    deriveSummaryEntrySpans,
     estimateInputTokens,
     formatManifestOperations,
     getEffectiveThinkingLevel,
@@ -168,28 +167,6 @@ function thinkingEntry(level: string): SessionEntry {
     } as SessionEntry;
 }
 
-function customMessageEntry(id: string, text: string): SessionEntry {
-    return {
-        id,
-        type: "custom_message",
-        customType: "note",
-        content: text,
-        display: "full",
-        timestamp: new Date().toISOString(),
-    } as SessionEntry;
-}
-
-function compactionEntry(id: string, summary: string, firstKeptEntryId = "first-kept"): SessionEntry {
-    return {
-        id,
-        type: "compaction",
-        summary,
-        firstKeptEntryId,
-        tokensBefore: 100,
-        timestamp: new Date().toISOString(),
-    } as SessionEntry;
-}
-
 function createContext(
     models: Model<Api>[],
     currentModel = models[0],
@@ -297,8 +274,8 @@ function createTreeEvent(overrides?: Partial<SessionBeforeTreeEvent>): SessionBe
 function createTestConfig(overrides: Partial<GroundedCompactionConfig> = {}): GroundedCompactionConfig {
     return {
         includeFilesTouched: {
-            inCompactionSummary: false,
-            inBranchSummary: false,
+            inCompactionSummary: "off",
+            inBranchSummary: "off",
         },
         defaultPreset: "current",
         toolResultChars: null,
@@ -355,26 +332,38 @@ describe("grounded-compaction parsing", () => {
 describe("grounded-compaction config", () => {
     it("parses valid config and preserves defaults when optional fields are omitted", () => {
         assert.deepEqual(parseConfig({}), DEFAULT_CONFIG);
+        assert.deepEqual(parseConfig({}).includeFilesTouched, { inCompactionSummary: "writer", inBranchSummary: "writer" });
     });
 
-    it("normalizes boolean includeFilesTouched across both features", () => {
-        assert.deepEqual(parseConfig({ includeFilesTouched: false }).includeFilesTouched, {
-            inCompactionSummary: false,
-            inBranchSummary: false,
+    it("applies a single includeFilesTouched mode to both features", () => {
+        assert.deepEqual(parseConfig({ includeFilesTouched: "writerAndReader" }).includeFilesTouched, {
+            inCompactionSummary: "writerAndReader",
+            inBranchSummary: "writerAndReader",
         });
+    });
+
+    it("rejects boolean and unknown includeFilesTouched values", () => {
+        const validValues = /must be "off", "writer", or "writerAndReader"/;
+        assert.throws(() => parseConfig({ includeFilesTouched: true }), validValues);
+        assert.throws(() => parseConfig({ includeFilesTouched: false }), validValues);
+        assert.throws(() => parseConfig({ includeFilesTouched: "reader" }), validValues);
+        assert.throws(
+            () => parseConfig({ includeFilesTouched: { inCompactionSummary: true, inBranchSummary: "writer" } }),
+            /includeFilesTouched\.inCompactionSummary must be "off", "writer", or "writerAndReader"/,
+        );
     });
 
     it("accepts explicit per-feature includeFilesTouched settings", () => {
         assert.deepEqual(
             parseConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: true,
-                    inBranchSummary: false,
+                    inCompactionSummary: "writerAndReader",
+                    inBranchSummary: "off",
                 },
             }).includeFilesTouched,
             {
-                inCompactionSummary: true,
-                inBranchSummary: false,
+                inCompactionSummary: "writerAndReader",
+                inBranchSummary: "off",
             },
         );
     });
@@ -383,16 +372,15 @@ describe("grounded-compaction config", () => {
         assert.throws(() => {
             parseConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: true,
+                    inCompactionSummary: "writerAndReader",
                 },
             });
-        }, /includeFilesTouched\.inBranchSummary must be a boolean/);
+        }, /includeFilesTouched\.inBranchSummary must be "off", "writer", or "writerAndReader"/);
     });
 
     it("rejects a defaultPreset that is neither current nor a declared preset", () => {
         assert.throws(() => {
             parseConfig({
-                includeFilesTouched: true,
                 defaultPreset: "fast",
                 presets: {},
             });
@@ -402,7 +390,6 @@ describe("grounded-compaction config", () => {
     it("rejects malformed preset entries", () => {
         assert.throws(() => {
             parseConfig({
-                includeFilesTouched: true,
                 presets: {
                     cheap: {
                         model: "",
@@ -452,7 +439,6 @@ describe("grounded-compaction config", () => {
 
     it("accepts a declared defaultPreset", () => {
         const config = parseConfig({
-            includeFilesTouched: true,
             defaultPreset: "fast",
             presets: {
                 fast: {
@@ -553,68 +539,6 @@ describe("grounded-compaction preset resolution", () => {
     });
 });
 
-describe("grounded-compaction summary spans", () => {
-    it("derives stock history span for non-split compaction", () => {
-        const entries = [
-            compactionEntry("old-compaction", "older", "custom-1"),
-            customMessageEntry("custom-1", "carry context"),
-            messageEntry("assistant-1", "assistant", "done"),
-            messageEntry("keep-1", "assistant", "keep this"),
-        ];
-
-        const spans = deriveSummaryEntrySpans({
-            branchEntries: entries,
-            firstKeptEntryId: "keep-1",
-            isSplitTurn: false,
-        });
-
-        assert.equal(spans.boundaryStart, 1);
-        assert.deepEqual(spans.historyEntries.map((entry) => entry.id), ["custom-1", "assistant-1"]);
-        assert.deepEqual(spans.turnPrefixEntries, []);
-    });
-
-    it("resumes repeated compactions from the previous kept boundary", () => {
-        const entries = [
-            messageEntry("dropped-user", "user", "Already compacted away"),
-            messageEntry("kept-user", "user", "Still in context after the last compaction"),
-            messageEntry("kept-assistant", "assistant", "Still in context too"),
-            compactionEntry("old-compaction", "older", "kept-user"),
-            customMessageEntry("fresh-note", "Fresh work after the prior compaction"),
-            messageEntry("keep-1", "assistant", "Keep this newest reply"),
-        ];
-
-        const spans = deriveSummaryEntrySpans({
-            branchEntries: entries,
-            firstKeptEntryId: "keep-1",
-            isSplitTurn: false,
-        });
-
-        assert.equal(spans.boundaryStart, 1);
-        assert.deepEqual(
-            spans.historyEntries.map((entry) => entry.id),
-            ["kept-user", "kept-assistant", "old-compaction", "fresh-note"],
-        );
-    });
-
-    it("derives history and turn-prefix spans for split turns", () => {
-        const entries = [
-            messageEntry("old-user", "user", "Previous turn"),
-            messageEntry("old-assistant", "assistant", "Previous answer"),
-            customMessageEntry("turn-start", "User note for current turn"),
-            messageEntry("kept", "assistant", "Suffix to keep"),
-        ];
-
-        const spans = deriveSummaryEntrySpans({
-            branchEntries: entries,
-            firstKeptEntryId: "kept",
-            isSplitTurn: true,
-        });
-
-        assert.deepEqual(spans.historyEntries.map((entry) => entry.id), ["old-user", "old-assistant"]);
-        assert.deepEqual(spans.turnPrefixEntries.map((entry) => entry.id), ["turn-start"]);
-    });
-});
-
 describe("grounded-compaction prompt assembly", () => {
     it("prepends stronger update guidance when previousSummary exists", () => {
         const prompt = buildSummaryUserPrompt({
@@ -622,6 +546,7 @@ describe("grounded-compaction prompt assembly", () => {
             promptContract: DEFAULT_COMPACTION_PROMPT_CONTRACT,
             serializedConversation: "[User]: hi",
             previousSummary: "Older summary",
+            filesTouchedLedger: { mode: "off" },
         });
 
         assert.match(prompt, /## Update instructions/);
@@ -635,6 +560,7 @@ describe("grounded-compaction prompt assembly", () => {
             promptContract: DEFAULT_COMPACTION_PROMPT_CONTRACT,
             serializedConversation: "[User]: hi",
             splitTurn: true,
+            filesTouchedLedger: { mode: "off" },
         });
         assert.match(splitPrompt, /## Split-turn note/);
         assert.match(splitPrompt, /as of the end of your span/);
@@ -643,6 +569,7 @@ describe("grounded-compaction prompt assembly", () => {
             mode: "history",
             promptContract: DEFAULT_COMPACTION_PROMPT_CONTRACT,
             serializedConversation: "[User]: hi",
+            filesTouchedLedger: { mode: "off" },
         });
         assert.doesNotMatch(plainPrompt, /## Split-turn note/);
     });
@@ -652,6 +579,7 @@ describe("grounded-compaction prompt assembly", () => {
             mode: "turn-prefix",
             promptContract: DEFAULT_COMPACTION_PROMPT_CONTRACT,
             serializedConversation: "[User]: hi",
+            filesTouchedLedger: { mode: "off" },
         });
 
         assert.match(prompt, /## Split-turn instructions/);
@@ -715,38 +643,40 @@ describe("grounded-compaction message serialization", () => {
 });
 
 describe("grounded-compaction branch-summary instruction builder", () => {
-    it("returns undefined when neither a prompt contract nor manifest is present", () => {
-        assert.equal(buildBranchSummaryInstructions({ focusText: "keep parser detail" }), undefined);
-    });
-
-    it("uses replaceInstructions when a branch-summary prompt contract exists", () => {
-        const result = buildBranchSummaryInstructions({
-            promptContract: "# Contract\nUse this shape",
-            focusText: "Focus on parser regressions",
-            filesTouchedManifestBlock: "## Files touched\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nR  src/a.ts\n```",
+    it("applies branch audience instructions with custom and stock contracts", () => {
+        const block = "## Files touched\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nR  src/a.ts\n```";
+        const focusText = "Focus on parser regressions";
+        const build = (mode: "off" | "writer" | "writerAndReader", promptContract?: string) => buildBranchSummaryInstructions({
+            promptContract,
+            focusText,
+            filesTouchedLedger: mode === "off" ? { mode } : { mode, block },
         });
 
-        assert.ok(result);
-        assert.equal(result.replaceInstructions, true);
-        assert.match(result.customInstructions, /# Contract/);
-        assert.match(result.customInstructions, /## Additional focus/);
-        assert.match(result.customInstructions, /Focus on parser regressions/);
-        assert.match(result.customInstructions, /## Authoritative files touched/);
-        assert.match(result.customInstructions, /Reproduce it verbatim/);
-    });
-
-    it("uses additive instructions when only files grounding is active", () => {
-        const result = buildBranchSummaryInstructions({
-            focusText: "Focus on parser regressions",
-            filesTouchedManifestBlock: "## Files touched\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nR  src/a.ts\n```",
+        assert.equal(build("off"), undefined);
+        assert.deepEqual(build("off", "# Contract\nUse this shape"), {
+            customInstructions: `# Contract\nUse this shape\n\n## Additional focus\nIncorporate this user-provided focus while staying faithful to the actual branch history.\n\n${focusText}`,
+            replaceInstructions: true,
         });
 
-        assert.ok(result);
-        assert.equal(result.replaceInstructions, false);
-        assert.match(result.customInstructions, /^Also include the authoritative files-touched block below/);
-        assert.match(result.customInstructions, /User focus:/);
-        assert.match(result.customInstructions, /Focus on parser regressions/);
-        assert.match(result.customInstructions, /Authoritative files touched: reproduce this block verbatim/);
+        for (const promptContract of ["# Contract\nUse this shape", undefined]) {
+            const writer = build("writer", promptContract);
+            assert.ok(writer);
+            assert.equal(writer.replaceInstructions, promptContract !== undefined);
+            assert.ok(writer.customInstructions.includes(block));
+            assert.ok(writer.customInstructions.includes(focusText));
+            assert.match(writer.customInstructions, /factual reference for you only/);
+            assert.match(writer.customInstructions, /use the final canonical path/);
+            assert.doesNotMatch(writer.customInstructions, /verbatim/i);
+
+            const writerAndReader = build("writerAndReader", promptContract);
+            assert.ok(writerAndReader);
+            assert.equal(writerAndReader.replaceInstructions, promptContract !== undefined);
+            assert.ok(writerAndReader.customInstructions.includes(block));
+            assert.match(writerAndReader.customInstructions, /verbatim in the summary body/);
+            assert.match(writerAndReader.customInstructions, /use the final canonical path/);
+        }
+        assert.match(build("writerAndReader")?.customInstructions ?? "", /^Also include the authoritative files-touched block below/);
+        assert.match(build("writer")?.customInstructions ?? "", /^Use the files-touched block below as reference/);
     });
 });
 
@@ -792,12 +722,12 @@ describe("grounded-compaction helpers", () => {
         );
 
         assert.equal(stripGroundedCompactionManifestTail(`Summary\n\n${manifest}`), "Summary");
-        assert.equal(
-            stripGroundedCompactionManifestTail(
-                `Summary\n\n---\n\n## Files touched (cumulative)\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n\`\`\`text\nRE src/a.ts\n\`\`\``,
-            ),
-            "Summary",
-        );
+        const cumulative = "## Files touched (cumulative)\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nRE src/a.ts\n```";
+        assert.equal(stripGroundedCompactionManifestTail(`Summary\n\n---\n\n${cumulative}`), "Summary");
+        assert.equal(stripGroundedCompactionManifestTail(`Summary\n\n${manifest}\n\n---\n\n${cumulative}\n`), "Summary");
+        assert.equal(stripGroundedCompactionManifestTail(cumulative), undefined);
+        const midBody = `Summary\n\n---\n\n${cumulative}\n\n## Critical evidence\n\n\`\`\`text\nkeep me\n\`\`\``;
+        assert.equal(stripGroundedCompactionManifestTail(midBody), midBody);
     });
 });
 
@@ -856,8 +786,8 @@ describe("grounded-compaction runtime", () => {
             },
             loadConfig: async () => createTestConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: false,
-                    inBranchSummary: false,
+                    inCompactionSummary: "off",
+                    inBranchSummary: "off",
                 },
                 defaultPreset: "fast",
                 presets: {
@@ -899,7 +829,7 @@ describe("grounded-compaction runtime", () => {
                     return createAssistantResponse("summary");
                 },
                 loadConfig: async () => createTestConfig({
-                    includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                    includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                     defaultPreset: "current",
                     toolResultChars: 4,
                     presets: {},
@@ -928,6 +858,7 @@ describe("grounded-compaction runtime", () => {
             mode: "history",
             promptContract: "Keep it concise",
             serializedConversation: serializePreparedMessages(event.preparation.messagesToSummarize, 4),
+            filesTouchedLedger: { mode: "off" },
         });
         const defaultModel = createModel({
             id: "default",
@@ -1015,7 +946,7 @@ describe("grounded-compaction runtime", () => {
                 return createAssistantResponse("large summary");
             },
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "fast",
                 largeContextPreset: "large",
                 presets: {
@@ -1053,7 +984,7 @@ describe("grounded-compaction runtime", () => {
                     return createAssistantResponse("must not run");
                 },
                 loadConfig: async () => createTestConfig({
-                    includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                    includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                     defaultPreset: "current",
                     largeContextPreset: "large",
                     presets: { large: { model: "anthropic/large" } },
@@ -1094,7 +1025,7 @@ describe("grounded-compaction runtime", () => {
                 return createAssistantResponse(model.id === "large" ? "large summary" : "unexpected summary");
             },
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 largeContextPreset: "large",
                 presets: { large: { model: "anthropic/large" } },
@@ -1162,7 +1093,7 @@ describe("grounded-compaction runtime", () => {
                     return createAssistantResponse("must not run");
                 },
                 loadConfig: async () => createTestConfig({
-                    includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                    includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                     defaultPreset: "fast",
                     largeContextPreset: "large",
                     presets: {
@@ -1189,7 +1120,7 @@ describe("grounded-compaction runtime", () => {
                 return createAssistantResponse("", "error");
             },
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 largeContextPreset: "large",
                 presets: { large: { model: "anthropic/large" } },
@@ -1224,6 +1155,7 @@ describe("grounded-compaction runtime", () => {
             mode: "history",
             promptContract: "Keep it concise",
             serializedConversation: serializePreparedMessages(event.preparation.messagesToSummarize),
+            filesTouchedLedger: { mode: "off" },
         });
         const estimatedInputTokens = estimateInputTokens(`${DEFAULT_SYSTEM_PROMPT}\n\n${userPrompt}`);
         const model = createModel({ contextWindow: estimatedInputTokens + maxTokens, maxTokens });
@@ -1289,6 +1221,7 @@ describe("grounded-compaction runtime", () => {
             mode: "history",
             promptContract: "Keep it concise",
             serializedConversation: serializePreparedMessages(baseEvent.preparation.messagesToSummarize),
+            filesTouchedLedger: { mode: "off" },
         });
         const maxTokens = 50;
         const model = createModel({
@@ -1324,7 +1257,7 @@ describe("grounded-compaction runtime", () => {
                 return createAssistantResponse("must not run");
             },
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 largeContextPreset: "large",
                 presets: { large: { model: "anthropic/large" } },
@@ -1362,7 +1295,7 @@ describe("grounded-compaction runtime", () => {
                 return createAssistantResponse("must not run");
             },
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 largeContextPreset: "large",
                 presets: { large: { model: "anthropic/large" } },
@@ -1386,7 +1319,7 @@ describe("grounded-compaction runtime", () => {
                 return createAssistantResponse("must not run");
             },
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 largeContextPreset: "large",
                 presets: { large: { model: "anthropic/large" } },
@@ -1405,7 +1338,7 @@ describe("grounded-compaction runtime", () => {
         const result = await runGroundedCompaction(createEvent(), ctx, createDeps({
             complete: async () => createAssistantResponse("", "error"),
             loadConfig: async () => createTestConfig({
-                includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                 defaultPreset: "current",
                 largeContextPreset: "large",
                 presets: { large: { model: "anthropic/large" } },
@@ -1431,7 +1364,7 @@ describe("grounded-compaction runtime", () => {
                         return createAssistantResponse("must not run");
                     },
                     loadConfig: async () => createTestConfig({
-                        includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                        includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                         defaultPreset: "current",
                         largeContextPreset: "large",
                         presets: { large: { model: "anthropic/large" } },
@@ -1485,8 +1418,8 @@ describe("grounded-compaction runtime", () => {
             },
             loadConfig: async () => createTestConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: false,
-                    inBranchSummary: false,
+                    inCompactionSummary: "off",
+                    inBranchSummary: "off",
                 },
                 defaultPreset: "fast",
                 presets: {
@@ -1538,8 +1471,8 @@ describe("grounded-compaction runtime", () => {
             },
             loadConfig: async () => createTestConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: false,
-                    inBranchSummary: false,
+                    inCompactionSummary: "off",
+                    inBranchSummary: "off",
                 },
                 defaultPreset: "fast",
                 presets: {
@@ -1580,8 +1513,8 @@ describe("grounded-compaction runtime", () => {
             },
             loadConfig: async () => createTestConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: false,
-                    inBranchSummary: false,
+                    inCompactionSummary: "off",
+                    inBranchSummary: "off",
                 },
                 defaultPreset: "current",
                 presets: {},
@@ -1606,8 +1539,8 @@ describe("grounded-compaction runtime", () => {
             complete: async () => createAssistantResponse("", "error"),
             loadConfig: async () => createTestConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: false,
-                    inBranchSummary: false,
+                    inCompactionSummary: "off",
+                    inBranchSummary: "off",
                 },
                 defaultPreset: "current",
                 presets: {},
@@ -1632,7 +1565,7 @@ describe("grounded-compaction runtime", () => {
                     return createAssistantResponse("", "error");
                 },
                 loadConfig: async () => createTestConfig({
-                    includeFilesTouched: { inCompactionSummary: false, inBranchSummary: false },
+                    includeFilesTouched: { inCompactionSummary: "off", inBranchSummary: "off" },
                     defaultPreset: "current",
                     presets: { explicit: { model: "anthropic/explicit" } },
                 }),
@@ -1780,42 +1713,30 @@ describe("grounded-compaction runtime", () => {
             },
         });
 
-        let callIndex = 0;
+        const prompts: string[] = [];
+        const collected: SessionEntry[][] = [];
         const result = await runGroundedCompaction(event, ctx, createDeps({
-            complete: async () => {
-                callIndex += 1;
-                return createAssistantResponse(callIndex === 1 ? "history summary" : "turn summary");
+            complete: async (_model, context) => {
+                // SAFETY: each summary request is one user message whose first content part is the prompt text.
+                const promptText = (context.messages[0].content as Array<{ text?: string }>)[0].text ?? "";
+                prompts.push(promptText);
+                return createAssistantResponse(promptText.includes("Summarize this compaction history span")
+                    ? "history summary\n\n---\n\n## Files touched (cumulative)\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nE  src/whole.ts\n```"
+                    : "turn summary");
             },
             collectFilesTouched: (entries) => {
-                if (entries.length === 4) {
-                    return [{
-                        path: "/repo/src/whole.ts",
-                        displayPath: "src/whole.ts",
-                        operations: new Set(["edit"]),
-                        lastTimestamp: 4,
-                    }];
-                }
-
-                if (entries.length === 2) {
-                    return [{
-                        path: "/repo/src/history.ts",
-                        displayPath: "src/history.ts",
-                        operations: new Set(["read"]),
-                        lastTimestamp: 2,
-                    }];
-                }
-
+                collected.push(entries);
                 return [{
-                    path: "/repo/src/turn.ts",
-                    displayPath: "src/turn.ts",
-                    operations: new Set(["write"]),
-                    lastTimestamp: 3,
+                    path: "/repo/src/whole.ts",
+                    displayPath: "src/whole.ts",
+                    operations: new Set(["edit"]),
+                    lastTimestamp: 4,
                 }];
             },
             loadConfig: async () => createTestConfig({
                 includeFilesTouched: {
-                    inCompactionSummary: true,
-                    inBranchSummary: false,
+                    inCompactionSummary: "writerAndReader",
+                    inBranchSummary: "off",
                 },
                 defaultPreset: "current",
                 presets: {},
@@ -1823,7 +1744,13 @@ describe("grounded-compaction runtime", () => {
         }));
 
         assert.ok(result && "compaction" in result);
-        assert.equal(callIndex, 2);
+        assert.deepEqual(collected, [event.branchEntries]);
+        assert.equal(prompts.length, 2);
+        for (const prompt of prompts) {
+            assert.match(prompt, /## Cumulative files-touched reference/);
+            assert.match(prompt, /E  src\/whole\.ts/);
+            assert.match(prompt, /will append this cumulative ledger verbatim/);
+        }
         assert.equal(
             result.compaction.summary,
             [
@@ -1851,6 +1778,58 @@ describe("grounded-compaction runtime", () => {
         assert.equal(result.compaction.tokensBefore, 999);
         assert.equal((result.compaction.summary.match(/## Files touched/g) ?? []).length, 1);
     });
+
+    it("routes the whole-branch ledger to the configured audiences", async () => {
+        const reproducedLedger = "## Files touched (cumulative)\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nE  src/kept.ts\n```";
+        for (const mode of ["off", "writer", "writerAndReader"] as const) {
+            const { ctx } = createContext([createModel()]);
+            const event = createEvent();
+            const collected: SessionEntry[][] = [];
+            let promptText = "";
+            const result = await runGroundedCompaction(event, ctx, createDeps({
+                complete: async (_model, context) => {
+                    // SAFETY: each summary request is one user message whose first content part is the prompt text.
+                    promptText = (context.messages[0].content as Array<{ text?: string }>)[0].text ?? "";
+                    return createAssistantResponse(`Body\n\n---\n\n${reproducedLedger}`);
+                },
+                collectFilesTouched: (entries) => {
+                    collected.push(entries);
+                    return [{ path: "/repo/src/kept.ts", displayPath: "src/kept.ts", operations: new Set(["edit"]), lastTimestamp: 1 }];
+                },
+                loadConfig: async () => createTestConfig({ includeFilesTouched: { inCompactionSummary: mode, inBranchSummary: "off" } }),
+            }));
+
+            assert.ok(result && "compaction" in result, mode);
+            if (mode === "off") {
+                assert.deepEqual(collected, []);
+                assert.doesNotMatch(promptText, /Cumulative files-touched reference/);
+                assert.equal(result.compaction.summary, "Body");
+            } else if (mode === "writer") {
+                assert.deepEqual(collected, [event.branchEntries]);
+                assert.match(promptText, /## Cumulative files-touched reference/);
+                assert.match(promptText, /E  src\/kept\.ts/);
+                assert.match(promptText, /will not be included in the summary/);
+                assert.equal(result.compaction.summary, "Body");
+            } else {
+                assert.deepEqual(collected, [event.branchEntries]);
+                assert.match(promptText, /will append this cumulative ledger verbatim/);
+                assert.equal(result.compaction.summary, `Body\n\n---\n\n${reproducedLedger}`);
+            }
+        }
+    });
+
+    it("rejects a model response containing only a ledger", async () => {
+        const { ctx, notifications } = createContext([createModel()]);
+        const result = await runGroundedCompaction(createEvent(), ctx, createDeps({
+            complete: async () => createAssistantResponse(
+                "## Files touched (cumulative)\nR=read, W=write, E=edit, M=move/rename, D=delete\n\n```text\nR  a.ts\n```",
+            ),
+            loadConfig: async () => createTestConfig({ includeFilesTouched: { inCompactionSummary: "writer", inBranchSummary: "off" } }),
+        }));
+
+        assert.equal(result, undefined);
+        assert.ok(notifications.some((message) => /Summarization returned no summary body/.test(message)));
+    });
 });
 
 describe("grounded-compaction tree augmentation runtime", () => {
@@ -1867,8 +1846,8 @@ describe("grounded-compaction tree augmentation runtime", () => {
             createDeps({
                 loadConfig: async () => createTestConfig({
                     includeFilesTouched: {
-                        inCompactionSummary: false,
-                        inBranchSummary: true,
+                        inCompactionSummary: "off",
+                        inBranchSummary: "writerAndReader",
                     },
                     defaultPreset: "current",
                     presets: {},
@@ -1892,8 +1871,8 @@ describe("grounded-compaction tree augmentation runtime", () => {
             createDeps({
                 loadConfig: async () => createTestConfig({
                     includeFilesTouched: {
-                        inCompactionSummary: false,
-                        inBranchSummary: true,
+                        inCompactionSummary: "off",
+                        inBranchSummary: "writerAndReader",
                     },
                     defaultPreset: "current",
                     presets: {},
@@ -1923,8 +1902,8 @@ describe("grounded-compaction tree augmentation runtime", () => {
                 }],
                 loadConfig: async () => createTestConfig({
                     includeFilesTouched: {
-                        inCompactionSummary: false,
-                        inBranchSummary: true,
+                        inCompactionSummary: "off",
+                        inBranchSummary: "writerAndReader",
                     },
                     defaultPreset: "current",
                     presets: {},
@@ -1962,8 +1941,8 @@ describe("grounded-compaction tree augmentation runtime", () => {
                 }],
                 loadConfig: async () => createTestConfig({
                     includeFilesTouched: {
-                        inCompactionSummary: false,
-                        inBranchSummary: true,
+                        inCompactionSummary: "off",
+                        inBranchSummary: "writerAndReader",
                     },
                     defaultPreset: "current",
                     presets: {},
@@ -2001,8 +1980,8 @@ describe("grounded-compaction tree augmentation runtime", () => {
                 },
                 loadConfig: async () => createTestConfig({
                     includeFilesTouched: {
-                        inCompactionSummary: false,
-                        inBranchSummary: true,
+                        inCompactionSummary: "off",
+                        inBranchSummary: "writer",
                     },
                     defaultPreset: "current",
                     presets: {},
@@ -2013,6 +1992,8 @@ describe("grounded-compaction tree augmentation runtime", () => {
         assert.deepEqual(capturedEntries, entriesToSummarize);
         assert.ok(result);
         assert.equal(result.replaceInstructions, false);
+        assert.match(result.customInstructions ?? "", /factual reference for you only/);
+        assert.doesNotMatch(result.customInstructions ?? "", /verbatim/i);
     });
 
     it("returns undefined and warns on failure instead of canceling", async () => {

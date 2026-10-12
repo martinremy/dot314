@@ -9,7 +9,7 @@ This extension can play three roles:
 
 The compaction and `/tree` features work without the coordinator. Coordinator integration is optional.
 
-Files-touched tracking covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the extension warns and includes the confirmed operations in summaries. See [Files Touched coverage](../../packages/pi-files-touched/README.md#what-it-tracks) for supported commands and limits.
+Files-touched tracking covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the extension warns and includes the confirmed operations in the manifest. See [Files Touched coverage](../../packages/pi-files-touched/README.md#what-it-tracks) for supported commands and limits.
 
 > ⚠ **May conflict with other compaction extensions**: this extension hooks `session_before_compact` and returns a custom compaction result.  Any other extension that does the same is incompatible.  Having both active creates a race condition where the last handler to respond wins.  Enable only one.
 
@@ -37,8 +37,8 @@ For background on Pi's compaction lifecycle, see the [compaction docs](https://g
 ```json
 {
   "includeFilesTouched": {
-    "inCompactionSummary": true,
-    "inBranchSummary": true
+    "inCompactionSummary": "writer",
+    "inBranchSummary": "writer"
   },
   "toolResultChars": null,
   "defaultPreset": "current",
@@ -48,15 +48,23 @@ For background on Pi's compaction lifecycle, see the [compaction docs](https://g
 
 ### `includeFilesTouched`
 
-Controls files-touched grounding per feature.  Accepts `true`, `false`, or an object with both fields required:
+The files-touched manifest is a block listing each file the session read, wrote, edited, moved, or deleted, built from recorded tool calls. This setting decides which models see it. The *writer* is the model that writes a summary: the compaction summarizer, or Pi's own branch summarizer during `/tree`. The *reader* is the model that later continues the session with that summary in its context.
+
+- `"writer"` (default): the writer gets the manifest as reference and is told to name the files that matter in the summary itself. The saved summary contains no manifest.
+- `"writerAndReader"`: the writer gets the manifest, and the reader gets it too, after the summary.
+- `"off"`: no manifest is built.
+
+A single string sets both features. An object sets each feature separately, and both fields are required:
 
 ```json
-{ "inCompactionSummary": true, "inBranchSummary": false }
+{ "inCompactionSummary": "writer", "inBranchSummary": "off" }
 ```
 
-Boolean applies to both; omitted defaults to both enabled.
+Any other value, including `true` or `false`, makes the config invalid.
 
-For compaction, the manifest is passed into the summarizer prompt and a cumulative version is appended verbatim to the persisted summary.  For branch summaries, the manifest is injected into the prompt instructions for Pi's native summarizer to reproduce.  In both cases, the manifest also serves as a recall aid for the summarizer itself — file operations buried across many tool calls in a long context are easy to miss without an authoritative inventory.
+For compaction, the manifest covers the whole session branch, so the writer also sees files from history that earlier compactions summarized. In `"writerAndReader"` mode it is appended to the saved summary under `## Files touched (cumulative)`. Portable summaries for codex-compaction-coordinator use the history up to the checkpoint being summarized. For branch summaries, the manifest covers the entries being summarized, and Pi's summarizer is told either to reproduce it verbatim (`"writerAndReader"`) or to use it only as reference (`"writer"`). Pi also appends its own read and modified file lists to a branch summary when the summarized entries touched files, whatever this setting says.
+
+In both enabled modes the manifest is a recall aid for the writer. File operations spread across many tool calls in a long context are easy to miss without an authoritative list.
 
 ### `toolResultChars`
 
@@ -64,7 +72,7 @@ Controls how much text from each tool result the summarizer sees. `null` or omis
 
 Pi's own compaction keeps 2000 characters of each tool result, which holds summarization cost down and stays workable on models of any context size. Setting `toolResultChars` to `2000` matches that; `null` opts out of it. Keeping more text gives the summarizer better recall of what tools actually returned, at the cost of a larger, more expensive request that is likelier to need `largeContextPreset` (below).
 
-That cost is usually worth paying when the substance of a session lives in tool output rather than in the conversation around it — reading long files, working through test failures, inspecting query results or logs. Two thousand characters is often just the head of a file or the first frames of a stack trace, so a summary built from it can record which files were examined while losing what they contained. The files-touched manifest preserves the paths either way, but only the tool text carries what was in them.
+That cost is usually worth paying when the substance of a session lives in tool output rather than in the conversation around it: reading long files, working through test failures, inspecting query results or logs. Two thousand characters is often just the head of a file or the first frames of a stack trace, so a summary built from it can record which files were examined while losing what they contained. When the files-touched manifest is enabled, the summarizer sees every recorded path either way, but only the tool text shows what the files contained.
 
 A limit earns its keep in the opposite case: sessions dominated by bulky, low-signal output such as long directory listings, verbose build logs, or repeated large fetches. There the extra text mostly buys request size, and a cap keeps compaction affordable on a smaller default model.
 
@@ -110,7 +118,7 @@ Only a leading `--preset` / `-p` is special; everything after is freeform focus 
 During `/tree`, if the user chooses to summarize:
 
 - If `branch-summary-prompt.md` has content, it replaces Pi's stock branch-summary instructions
-- If files-touched grounding is enabled, the manifest is injected with instructions to reproduce it verbatim
+- If files-touched grounding is enabled, the manifest is added to the instructions, and depending on `includeFilesTouched` Pi's summarizer is told to reproduce it verbatim (`"writerAndReader"`) or to use it only as reference (`"writer"`)
 - If neither is active, the extension does nothing and Pi's stock flow runs unmodified
 - On any failure, the extension returns nothing and Pi's stock flow proceeds
 
@@ -124,7 +132,7 @@ For branch summaries, Pi's `session_before_tree` hook only exposes prompt instru
 
 ## How compaction summaries are structured
 
-The extension mirrors Pi's stock compaction boundaries: `messagesToSummarize` for history, `turnPrefixMessages` for split-turn prefixes, and `previousSummary` for cumulative updates.  On repeated compactions, that means resuming from the previous compaction's `firstKeptEntryId`, not from the compaction entry itself, and the files-touched manifests follow that same boundary.  When files-touched is enabled, manifests are passed to the summarizer per-span and a cumulative whole-branch manifest is appended to the final persisted summary:
+The extension mirrors Pi's stock compaction boundaries: `messagesToSummarize` for history, `turnPrefixMessages` for split-turn prefixes, and `previousSummary` for cumulative updates.  On repeated compactions, that means resuming from the previous compaction's `firstKeptEntryId`, not from the compaction entry itself.  When files-touched is enabled, every summarization request gets the same whole-branch manifest, and the summarizer is told whether the extension will append it. A manifest the model copies to the end of its own output is removed. In `"writerAndReader"` mode, the cumulative manifest is appended to the final persisted summary:
 
 ````md
 ---
@@ -153,5 +161,7 @@ Rerouting to `largeContextPreset` happens only when a request is too large for t
 An explicit `-p` preset cancels if its model cannot fit the request or fails while summarizing. A summarization failure on a compaction that did fit leaves Pi's stock compaction available. Aborts cancel quietly.
 
 **Branch summary**: any failure returns `undefined` with a warning, letting Pi's stock flow proceed.
+
+**Invalid `config.json`**: compaction warns and Pi runs its stock compaction (an explicit `-p` preset cancels compaction instead), and branch summaries use Pi's stock flow. When codex-compaction-coordinator requests a portable summary, the error appears only as its generic "Codex checkpoint portability failed" notice, so check grounded-compaction's `config.json` first when that notice appears.
 
 For npm installation and package-specific docs, see [`packages/pi-grounded-compaction/README.md`](../../packages/pi-grounded-compaction/README.md)
