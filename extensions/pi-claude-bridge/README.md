@@ -52,7 +52,7 @@ Pi keeps the terminal, the tools and the conversation history. Claude Code does 
  reply done       │                         │                         │
 ```
 
-One Claude Code query spans the whole turn. While Pi runs a tool, Claude Code is waiting on that MCP call, so nothing restarts between tool calls. A steering message you send meanwhile goes into the same query just before the tool result, and Claude's very next response sees both.
+One Claude Code query normally spans the whole turn. While Pi runs a tool, Claude Code waits on that MCP call. A steering message you send meanwhile goes into the same query just before the tool result, and Claude's very next response sees both. If Pi changes the system instructions, the bridge restarts with the current prompt and completed tool results before Claude replies. Prompt changes can reduce cache reuse. If Claude Code executed connector or other calls absent from Pi's history, the bridge stops with an error because it cannot safely replay that history.
 
 ### How Pi's tools reach Claude
 

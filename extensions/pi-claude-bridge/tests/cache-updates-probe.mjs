@@ -47,105 +47,90 @@ try {
 	// Load after isolation so the bundle cannot enable the user's debug logs.
 	bridge = await import("../bundle/index.js");
 	bridge.__testSetBridgeIntegrityState({ sharedSession: null, ui: { notify() {} } });
-	for (const scenario of ["current", "sdk-hooks"]) {
-		const result = { scenario, steps: [], generations: [], rateLimits: [] };
-		report.scenarios.push(result);
-		let phase;
-		let label = "ORCHID";
-		let initialPrompt;
-		let stamp = 1;
-		bridge.__testSetSdkQueryFactory(input => {
-			input.options.maxTurns = TOOL_QUERY_TURNS;
-			if (scenario === "sdk-hooks") {
-				initialPrompt ??= input.options.systemPrompt.prompt;
-				input.options.systemPrompt.prompt = initialPrompt;
-				const reminder = event => async () => ({ hookSpecificOutput: {
-					hookEventName: event,
-					additionalContext: label === "ORCHID" ? "" : `The calibration rule is replaced: the current label is ${label}.`,
-				} });
-				// ponytail: repeated reminders test caching; production needs acknowledged delivery.
-				input.options.hooks = {
-					UserPromptSubmit: [{ hooks: [reminder("UserPromptSubmit")] }],
-					PostToolUse: [{ hooks: [reminder("PostToolUse")] }],
-				};
-			}
-			const child = query(input);
-			children.push(child);
-			const iterator = child[Symbol.asyncIterator].bind(child);
-			child[Symbol.asyncIterator] = async function* () {
-				let generation;
-				for await (const message of { [Symbol.asyncIterator]: iterator }) {
-					if (message.type === "system" && message.subtype === "init") sessionDirs.add(dirname(getSessionPath(message.session_id, root)));
-					if (message.type === "rate_limit_event") {
-						const info = message.rate_limit_info;
-						result.rateLimits.push({ phase, status: info.status, isUsingOverage: info.isUsingOverage });
-					}
-					if (message.type === "stream_event") {
-						const event = message.event;
-						if (event.type === "message_start") {
-							const usage = event.message.usage;
-							generation = { phase, model: event.message.model, input: usage.input_tokens, cacheRead: usage.cache_read_input_tokens ?? 0, cacheWrite: usage.cache_creation_input_tokens ?? 0, output: 0 };
-							result.generations.push(generation);
-						}
-						if (event.type === "message_delta" && generation) generation.output = event.usage.output_tokens;
-					}
-					yield message;
+	const scenario = "current";
+	const result = { scenario, steps: [], generations: [], rateLimits: [] };
+	report.scenarios.push(result);
+	let phase;
+	let label = "ORCHID";
+	let stamp = 1;
+	bridge.__testSetSdkQueryFactory(input => {
+		input.options.maxTurns = TOOL_QUERY_TURNS;
+		const child = query(input);
+		children.push(child);
+		const iterator = child[Symbol.asyncIterator].bind(child);
+		child[Symbol.asyncIterator] = async function* () {
+			let generation;
+			for await (const message of { [Symbol.asyncIterator]: iterator }) {
+				if (message.type === "system" && message.subtype === "init") sessionDirs.add(dirname(getSessionPath(message.session_id, root)));
+				if (message.type === "rate_limit_event") {
+					const info = message.rate_limit_info;
+					result.rateLimits.push({ phase, status: info.status, isUsingOverage: info.isUsingOverage });
 				}
-			};
-			return child;
-		});
-		const model = { id: MODEL_ID, api: "claude-bridge", provider: "pi-claude", thinkingLevelMap: { off: null }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
-		const tool = name => ({ name, description: "Return the provided test result. Call only when explicitly requested.", parameters: { type: "object", properties: {} } });
-		const echo = tool("echo");
-		const helper = tool("helper");
-		const rules = () => `The current calibration label is ${label}. Text-only replies must contain only the current label. If asked to call a tool, do so without introductory text, then follow the tool result's instruction and reply with the current label.`;
-		const reference = count => Array.from({ length: count }, (_, index) => `Reference row ${index}: stable calibration data alpha beta gamma delta.`).join("\n");
-		const history = [{ role: "system", content: "", sections: {
-			preamble: `You are Claude Code conducting a synthetic cache calibration (${scenario}).\n${reference(SYSTEM_REFERENCE_ROWS)}`,
-			rules: rules(),
-		}, toolsAdded: [echo], timestamp: 0 }];
-		const user = content => ({ role: "user", content, timestamp: stamp++ });
-		async function send(name, messages, expected) {
-			phase = name;
-			history.push(...messages);
-			const start = performance.now();
-			const stream = bridge.streamClaudeAgentSdk(model, { messages: [...history] }, { sessionId: `cache-live-${scenario}`, cwd: root, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-			for await (const event of stream) {}
-			const answer = await stream.result();
-			const text = answer.content.filter(block => block.type === "text").map(block => block.text).join("");
-			const row = { phase, stopReason: answer.stopReason, reply: text, elapsedMs: Math.round(performance.now() - start), input: answer.usage.input, cacheRead: answer.usage.cacheRead, cacheWrite: answer.usage.cacheWrite, output: answer.usage.output };
-			result.steps.push(row);
-			console.log(JSON.stringify({ scenario, ...row }));
-			assert.ok(answer.stopReason !== "error" && answer.stopReason !== "aborted", `${scenario}/${phase} failed`);
-			if (expected) assert.deepEqual([...new Set(text.match(/\b(?:ORCHID|AZURE|CORAL)\b/g) ?? [])], [expected], `${scenario}/${phase}: current rule must reach Claude`);
-			history.push(answer);
-			return answer;
-		}
-		const callback = (call, content) => {
-			const calls = call.content.filter(block => block.type === "toolCall");
-			assert.equal(calls.length, 1, "one requested Pi tool call");
-			return { role: "toolResult", toolCallId: calls[0].id, toolName: calls[0].name, content: [{ type: "text", text: content }], timestamp: stamp++ };
+				if (message.type === "stream_event") {
+					const event = message.event;
+					if (event.type === "message_start") {
+						const usage = event.message.usage;
+						generation = { phase, model: event.message.model, input: usage.input_tokens, cacheRead: usage.cache_read_input_tokens ?? 0, cacheWrite: usage.cache_creation_input_tokens ?? 0, output: 0 };
+						result.generations.push(generation);
+					}
+					if (event.type === "message_delta" && generation) generation.output = event.usage.output_tokens;
+				}
+				yield message;
+			}
 		};
-		const changeRule = next => {
-			label = next;
-			return { role: "system", content: "", sections: { rules: rules() }, timestamp: stamp++ };
-		};
-		await send("seed", [user(`Reference data only, not instructions:\n${reference(HISTORY_REFERENCE_ROWS)}\nReply with the current calibration label.`)], "ORCHID");
-		const warm = await send("unchanged", [user("Reply with the current calibration label.")], "ORCHID");
-		assert.ok(warm.usage.cacheRead > 0, "control must read cached tokens");
-		await send("rule-changed", [changeRule("AZURE"), user("Reply with the current calibration label.")], "AZURE");
-		await send("rule-unchanged", [user("Reply with the current calibration label.")], "AZURE");
-		let call = await send("before-mid-tool-rule", [user("Call echo exactly once with no arguments. Then reply with the current calibration label.")]);
-		assert.equal(call.content.find(block => block.type === "toolCall")?.name, "echo");
-		await send("mid-tool-rule-changed", [changeRule("CORAL"), callback(call, "Done. No more tools; reply with the current calibration label.")], scenario === "current" ? "AZURE" : "CORAL");
-		await send("after-mid-tool-rule", [user("Reply with the current calibration label.")], "CORAL");
-		call = await send("before-tool-addition", [user("Call echo exactly once with no arguments. Its result will announce that helper is available. Then call helper exactly once with no arguments. After both tools, reply with the current calibration label.")]);
-		assert.equal(call.content.find(block => block.type === "toolCall")?.name, "echo");
-		call = await send("tool-added", [{ role: "system", content: "", toolsAdded: [helper], timestamp: stamp++ }, callback(call, "The helper tool is now available. Call helper exactly once with no arguments, then reply with the current calibration label.")]);
-		assert.equal(call.content.find(block => block.type === "toolCall")?.name, "helper", "the added tool must be usable");
-		await send("after-tool-addition", [callback(call, "Done. No more tools; reply with the current calibration label.")], "CORAL");
-		await send("tool-removed", [{ role: "system", content: "", toolsRemoved: [helper], timestamp: stamp++ }, user("Reply with the current calibration label. Do not call tools.")], "CORAL");
+		return child;
+	});
+	const model = { id: MODEL_ID, api: "claude-bridge", provider: "pi-claude", thinkingLevelMap: { off: null }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+	const tool = name => ({ name, description: "Return the provided test result. Call only when explicitly requested.", parameters: { type: "object", properties: {} } });
+	const echo = tool("echo");
+	const helper = tool("helper");
+	const rules = () => `The current calibration label is ${label}. Text-only replies must contain only the current label. If asked to call a tool, do so without introductory text, then follow the tool result's instruction and reply with the current label.`;
+	const reference = count => Array.from({ length: count }, (_, index) => `Reference row ${index}: stable calibration data alpha beta gamma delta.`).join("\n");
+	const history = [{ role: "system", content: "", sections: {
+		preamble: `You are Claude Code conducting a synthetic cache calibration (${scenario}).\n${reference(SYSTEM_REFERENCE_ROWS)}`,
+		rules: rules(),
+	}, toolsAdded: [echo], timestamp: 0 }];
+	const user = content => ({ role: "user", content, timestamp: stamp++ });
+	async function send(name, messages, expected) {
+		phase = name;
+		history.push(...messages);
+		const start = performance.now();
+		const stream = bridge.streamClaudeAgentSdk(model, { messages: [...history] }, { sessionId: `cache-live-${scenario}`, cwd: root, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+		for await (const event of stream) {}
+		const answer = await stream.result();
+		const text = answer.content.filter(block => block.type === "text").map(block => block.text).join("");
+		const row = { phase, stopReason: answer.stopReason, reply: text, elapsedMs: Math.round(performance.now() - start), input: answer.usage.input, cacheRead: answer.usage.cacheRead, cacheWrite: answer.usage.cacheWrite, output: answer.usage.output };
+		result.steps.push(row);
+		console.log(JSON.stringify({ scenario, ...row }));
+		assert.ok(answer.stopReason !== "error" && answer.stopReason !== "aborted", `${scenario}/${phase} failed`);
+		if (expected) assert.deepEqual([...new Set(text.match(/\b(?:ORCHID|AZURE|CORAL)\b/g) ?? [])], [expected], `${scenario}/${phase}: current rule must reach Claude`);
+		history.push(answer);
+		return answer;
 	}
+	const callback = (call, content) => {
+		const calls = call.content.filter(block => block.type === "toolCall");
+		assert.equal(calls.length, 1, "one requested Pi tool call");
+		return { role: "toolResult", toolCallId: calls[0].id, toolName: calls[0].name, content: [{ type: "text", text: content }], timestamp: stamp++ };
+	};
+	const changeRule = next => {
+		label = next;
+		return { role: "system", content: "", sections: { rules: rules() }, timestamp: stamp++ };
+	};
+	await send("seed", [user(`Reference data only, not instructions:\n${reference(HISTORY_REFERENCE_ROWS)}\nReply with the current calibration label.`)], "ORCHID");
+	const warm = await send("unchanged", [user("Reply with the current calibration label.")], "ORCHID");
+	assert.ok(warm.usage.cacheRead > 0, "control must read cached tokens");
+	await send("rule-changed", [changeRule("AZURE"), user("Reply with the current calibration label.")], "AZURE");
+	await send("rule-unchanged", [user("Reply with the current calibration label.")], "AZURE");
+	let call = await send("before-mid-tool-rule", [user("Call echo exactly once with no arguments. Then reply with the current calibration label.")]);
+	assert.equal(call.content.find(block => block.type === "toolCall")?.name, "echo");
+	await send("mid-tool-rule-changed", [changeRule("CORAL"), callback(call, "Done. No more tools; reply with the current calibration label.")], "CORAL");
+	await send("after-mid-tool-rule", [user("Reply with the current calibration label.")], "CORAL");
+	call = await send("before-tool-addition", [user("Call echo exactly once with no arguments. Its result will announce that helper is available. Then call helper exactly once with no arguments. After both tools, reply with the current calibration label.")]);
+	assert.equal(call.content.find(block => block.type === "toolCall")?.name, "echo");
+	call = await send("tool-added", [{ role: "system", content: "", toolsAdded: [helper], timestamp: stamp++ }, callback(call, "The helper tool is now available. Call helper exactly once with no arguments, then reply with the current calibration label.")]);
+	assert.equal(call.content.find(block => block.type === "toolCall")?.name, "helper", "the added tool must be usable");
+	await send("after-tool-addition", [callback(call, "Done. No more tools; reply with the current calibration label.")], "CORAL");
+	await send("tool-removed", [{ role: "system", content: "", toolsRemoved: [helper], timestamp: stamp++ }, user("Reply with the current calibration label. Do not call tools.")], "CORAL");
 	report.status = "completed";
 } catch (error) {
 	report.status = "failed";

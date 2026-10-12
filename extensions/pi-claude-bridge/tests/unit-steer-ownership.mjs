@@ -150,7 +150,7 @@ async function piTransform(agentMessages, handler) {
 const toolResult = (id) => ({ role: "toolResult", toolCallId: id, toolName: SLOW.name, content: [{ type: "text", text: `result ${id}` }], isError: false, timestamp: Date.now() });
 // Pi 0.87.1 records prompt-section and tool-loadout updates as mid-conversation
 // system messages in the provider context.
-const systemUpdate = () => ({ role: "system", content: "", sections: { note: "updated" }, timestamp: Date.now() });
+const systemUpdate = () => ({ role: "system", content: "", toolsAdded: [SLOW], timestamp: Date.now() });
 
 const userText = (message) => typeof message.content === "string" ? message.content : message.content.map((block) => block.text ?? "").join("");
 // Pi's ExtensionRunner.emitContext structuredClones the context, so a message

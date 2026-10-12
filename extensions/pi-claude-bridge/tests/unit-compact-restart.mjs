@@ -169,6 +169,22 @@ async function withWaitingQuery(run, childToolName, throwsOnClose = false, first
 }
 
 describe("compaction while Claude waits for a Pi tool result", () => {
+	it("restarts with current system instructions and imports the completed tool once", async () => {
+		await withWaitingQuery(async ({ root, record, calls, oldSession, oldBytes }) => {
+			const changed = { role: "system", content: "Require approval before writing files.", timestamp: 2 };
+			const events = await collect(streamClaudeAgentSdk(model, { messages: [system, runEcho, toolCall, changed, toolResult] }, { cwd: root }));
+			assert.equal(record.closed, true);
+			assert.equal(calls.length, 2);
+			assert.ok(calls[1].options.systemPrompt.prompt.includes(changed.content));
+			assert.notEqual(calls[1].options.resume, sessionId);
+			assert.equal(readFileSync(oldSession.jsonlPath, "utf8"), oldBytes);
+			const blocks = importedMessages(root, calls[1].options.resume).flatMap(message => Array.isArray(message.content) ? message.content : []);
+			assert.deepEqual(blocks.filter(block => block.type === "tool_result").map(block => block.content), ["tool output"]);
+			assert.equal(events.some(event => event.type === "toolcall_start"), false);
+			assert.equal(events.filter(event => event.type === "done").length, 1);
+		});
+	});
+
 	it("restarts on Pi's new history without executing the tool again", async () => {
 		await withWaitingQuery(async ({ root, record, calls, oldSession, oldBytes }) => {
 			onPiHistoryReplaced("session_compact");

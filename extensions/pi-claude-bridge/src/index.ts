@@ -22,7 +22,6 @@ import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCall
 import { answersKnownCall, deliverSteerBeforeResults, resolveToolResults } from "./tool-result-delivery.ts";
 import { abortSdkQuery, closeSdkQuery, teardownQuery } from "./query-teardown.ts";
 import { loadConfig, recordProjectTrust } from "./config.ts";
-import { systemInstructionHooks } from "./system-instructions.ts";
 import { hasClaudeCredentials } from "./auth-presence.ts";
 import { NATIVE_PROVIDER_UNSUPPORTED_MESSAGE, buildNativeProvider, supportsNativeProvider } from "./native-provider.ts";
 import { CLAUDE_CODE_TOOL_USE_ID, ServedToolServer, type ServedToolHandler } from "./served-tools.ts";
@@ -605,11 +604,12 @@ function applyProviderRegistration(trigger: string): void {
 }
 
 export const HISTORY_REPLACED_PROMPT = "The conversation above was rewritten by Pi (compaction or history navigation). It is the complete current history, including the results of every tool call that has already run. Continue the turn from there, and do not repeat a tool call whose result is already above.";
+const SYSTEM_INSTRUCTIONS_CHANGED_PROMPT = "Continue the turn using the current system instructions and the tool results above. Do not repeat a tool call whose result is already above.";
 
-function restartContext(context: Context): Context {
+function restartContext(context: Context, reason: QueryRestartRequest["reason"]): Context {
 	return {
 		...context,
-		messages: [...context.messages, { role: "user", content: HISTORY_REPLACED_PROMPT, timestamp: Date.now() }],
+		messages: [...context.messages, { role: "user", content: reason === "history-replaced" ? HISTORY_REPLACED_PROMPT : SYSTEM_INSTRUCTIONS_CHANGED_PROMPT, timestamp: Date.now() }],
 	};
 }
 
@@ -636,11 +636,10 @@ export function onPiHistoryReplaced(event: "session_compact" | "session_tree"): 
 	markSessionForRebuild({ reason: "history-replaced", forceRotate: restarts });
 }
 
-/** Restart the query of `queryCtx` on the history of `request` after Pi
- *  replaced its history. A child-side call is absent from Pi's transcript, so
- *  a query that made one must finish on its own history and the next turn
- *  must rebuild: returns false then. */
-function restartOnReplacedHistory(queryCtx: QueryContext, request: QueryRestartRequest): boolean {
+/** Restart the query on Pi's history after history or instruction changes.
+ *  A child-side call is absent from Pi's transcript, so a query that made
+ *  one cannot be replayed: returns false then. */
+function restartQueryOnHistory(queryCtx: QueryContext, request: QueryRestartRequest): boolean {
 	if (queryCtx.connectorCallAudit.size > 0 || queryCtx.foreignMcpCalls.size > 0) {
 		if (!queryCtx.reportedHistoryRestartDecline) {
 			queryCtx.reportedHistoryRestartDecline = true;
@@ -656,7 +655,7 @@ function restartOnReplacedHistory(queryCtx: QueryContext, request: QueryRestartR
 	queryCtx.piHistoryReplaced = false;
 	queryCtx.restartRequest = request;
 	queryCtx.currentPiStream = null;
-	debug("provider: restarting query on replaced history", request.context.messages.length);
+	debug("provider: restarting query", request.reason, request.context.messages.length);
 	abortSdkQuery(queryCtx.activeQuery!);
 	return true;
 }
@@ -785,7 +784,7 @@ function streamRequestInLane(
 			timing.kind = "tool-result";
 			attachRequestTiming(queryCtx, timing);
 		}
-		if (queryCtx.piHistoryReplaced && restartOnReplacedHistory(queryCtx, { model, context, options, stream, timing })) return stream;
+		if (queryCtx.piHistoryReplaced && restartQueryOnHistory(queryCtx, { reason: "history-replaced", model, context, options, stream, timing })) return stream;
 		queryCtx.currentPiStream = stream;
 		queryCtx.resetTurnState(model);
 		// Pi hands every provider call of one agent run the same signal, but
@@ -798,6 +797,13 @@ function streamRequestInLane(
 			debug("provider: tool-result callback arrived already cancelled; aborting the query");
 			return stream;
 		}
+		if (Boolean(queryCtx.instructionsChanged) && queryCtx.instructionsChanged(context.messages)) {
+			if (!restartQueryOnHistory(queryCtx, { reason: "system-instructions", model, context, options, stream, timing })) {
+				endStreamForFailure(queryCtx, { errorMessage: "System instructions changed, but Claude Code executed calls absent from Pi's history. The query was stopped because it cannot safely restart with the current instructions." });
+				queryCtx.onRequestAbort!();
+			}
+			return stream;
+		}
 		// A fresh callback separates handlers registered for settled turns from
 		// ones racing this callback's own stream — the stranded drain below only
 		// ever touches the former.
@@ -806,7 +812,6 @@ function streamRequestInLane(
 		const allResults = extractAllToolResults(context);
 		debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
 		syncServedTools(queryCtx, context);
-		if (Boolean(queryCtx.updateSystemInstructions)) queryCtx.updateSystemInstructions(context.messages);
 		const toolsSettling = queryCtx.servedToolsSettling;
 		// Results THIS callback delivers: new input, never an anchor for the
 		// user-message split below. Acknowledged once that split is done.
@@ -985,7 +990,7 @@ function streamRequestInLane(
 				resultCount: deliveredResultIds.length,
 				release: releaseResults,
 				signal: options?.signal,
-				restartOnReplacedHistory: () => restartOnReplacedHistory(queryCtx, { model, context, options, stream, timing }),
+				restartOnReplacedHistory: () => restartQueryOnHistory(queryCtx, { reason: "history-replaced", model, context, options, stream, timing }),
 			});
 		}
 		return stream;
@@ -996,7 +1001,7 @@ function streamRequestInLane(
 	// prompt rides on the context, so an account retry of this request repeats it.
 	if (!hostResumed && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !options?.signal?.aborted) {
 		debug("provider: a tool result after Pi replaced the history of an ended query; restarting the turn on the new history");
-		context = restartContext(context);
+		context = restartContext(context, "history-replaced");
 	}
 
 	// --- Orphaned tool result (e.g. user aborted a tool call) ---
@@ -1146,7 +1151,7 @@ function streamRequestInLane(
 	// earlier history, wherever a context transform moves them.
 	ctx().ownedUserMessages = UserMessageLedger.fromHistory(context.messages);
 	ctx().acknowledgedToolResultIds.clear();
-	ctx().updateSystemInstructions = null;
+	ctx().instructionsChanged = null;
 	ctx().userInputNeedsRebuild = false;
 	ctx().committedOutput = false;
 	ctx().piHistoryReplaced = false;
@@ -1453,19 +1458,14 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const renderInstructions = (messages: Context["messages"]): string => {
 		const system = getCurrentSystemMessage(messages);
 		const sections = Boolean(system) ? system.sections : undefined;
-		return outboundSystemPrompt({
-			queryModel, bridgeConfig,
-			systemPrompt: getCurrentSystemPrompt(messages),
-			systemPromptOrigin: {
-				preamble: Boolean(sections) ? Boolean(sections.preamble) ? sections.preamble : "" : undefined,
-				sessionId: Boolean(options) ? options.sessionId : undefined,
-				cacheRetention: Boolean(options) ? options.cacheRetention : undefined,
-			},
-		}).prompt;
+		return outboundSystemPrompt({ queryModel, bridgeConfig, systemPrompt: getCurrentSystemPrompt(messages), systemPromptOrigin: {
+			preamble: Boolean(sections) ? Boolean(sections.preamble) ? sections.preamble : "" : undefined,
+			sessionId: Boolean(options) ? options.sessionId : undefined,
+			cacheRetention: Boolean(options) ? options.cacheRetention : undefined,
+		} }).prompt;
 	};
-	const instructions = systemInstructionHooks(renderInstructions(context.messages), renderInstructions);
-	attemptCtx.updateSystemInstructions = instructions.update;
-	queryOptions.hooks = { ...queryOptions.hooks, ...instructions.hooks };
+	const currentInstructions = renderInstructions(context.messages);
+	attemptCtx.instructionsChanged = messages => renderInstructions(messages) !== currentInstructions;
 
 	debug("provider: fresh query",
 		`model=${queryModel.id} requested=${model.id} msgs=${context.messages.length} tools=${mcpTools.length}`,
@@ -1950,7 +1950,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 				}
 				// Re-entries continue THIS lane's conversation: never re-select it
 				// (requestLaneFor), which could move a fork's retry elsewhere.
-				for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart.context), restart.options, restart.timing))) reentryStream.push(event);
+				for await (const event of runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(restart.model, restartContext(restart.context, restart.reason), restart.options, restart.timing))) reentryStream.push(event);
 				reentryStream.end();
 				return;
 			}

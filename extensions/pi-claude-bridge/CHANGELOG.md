@@ -2,11 +2,13 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
-## 2026-10-11
+## 2026-10-12
 
 ### Fixed
 
-- System instructions changed during a Pi tool call reach Claude's next response through SDK system-context hooks. Previously they took effect only when a new query started. New queries still send the current system prompt.
+- System instructions changed during a Pi tool call take effect before Claude's next reply. The bridge restarts with the current leading prompt and imports completed tool results. It stops with an error when child-executed calls are absent from Pi's history and cannot be replayed safely. This replaces delivery through SDK hooks, which live tests showed could be treated as user or tool content. Prompt changes can invalidate the cache.
+
+## 2026-10-11
 
 ### Added
 

@@ -30,6 +30,7 @@ export interface DeferredUserMessage {
 }
 
 export interface QueryRestartRequest {
+	reason: "history-replaced" | "system-instructions";
 	model: Model<any>;
 	context: Context;
 	options: SimpleStreamOptions | undefined;
@@ -344,8 +345,7 @@ export class QueryContext {
 	 *  are classified, so that callback's own results are never anchors.
 	 *  Query-scoped, cleared at fresh-query setup. */
 	acknowledgedToolResultIds = new Set<string>();
-	/** Updates the instructions delivered by the SDK hook after a tool call. */
-	updateSystemInstructions: ((messages: Context["messages"]) => void) | null = null;
+	instructionsChanged: ((messages: Context["messages"]) => boolean) | null = null;
 	/** A mid-query user message could not be identified (see
 	 *  UserMessageLedger.classify), so a rebuild owns it: the record this query
 	 *  persists must carry needsRebuild. */

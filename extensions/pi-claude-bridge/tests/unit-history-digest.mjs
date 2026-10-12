@@ -47,7 +47,7 @@ const user = (text) => ({ role: "user", content: text, timestamp: stamp() });
 // What Pi's convertToLlm makes of a `custom` message (intercom, subagent notify).
 const customAsUser = (text) => ({ role: "user", content: [{ type: "text", text }], timestamp: stamp() });
 // Pi 0.87 records prompt-section and tool-loadout updates as system messages.
-const systemUpdate = () => ({ role: "system", content: "", sections: { note: "updated" }, timestamp: stamp() });
+const systemUpdate = () => ({ role: "system", content: "", toolsAdded: [READ], timestamp: stamp() });
 const LONG_BODY = (id) => `contents of ${id}\n${"line of file output\n".repeat(40)}`;
 const toolResult = (call) => ({ role: "toolResult", toolCallId: call.id, toolName: READ.name, content: [{ type: "text", text: LONG_BODY(call.id) }], isError: false, timestamp: stamp() });
 
