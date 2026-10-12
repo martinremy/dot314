@@ -129,6 +129,7 @@ const PARTIAL_OUTPUT = {
 const STALL = Symbol("stall until closed");
 const FAILURES = {
 	error_during_execution: () => [{ type: "result", subtype: "error_during_execution", errors: ["API Error: 500 internal server error"] }],
+	"unapproved usage credits": () => [{ type: "rate_limit_event", rate_limit_info: { status: "allowed", isUsingOverage: true } }],
 	// Claude Code's own usage-limit copy: surfaced from inside consumeQuery.
 	"usage limit": () => [{ type: "result", subtype: "error_during_execution", errors: ["You've hit your weekly limit · resets Thursday 4am"] }],
 	"process throw": () => [new Error("Claude Code process exited with code 1")],

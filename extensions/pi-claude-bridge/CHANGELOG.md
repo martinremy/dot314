@@ -2,6 +2,12 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-11
+
+### Added
+
+- Usage credits require `provider.allowUsageCredits: true` in the user `claude-bridge.json`. Detection interrupts the Claude query and stops account rotation, history restarts and deferred continuations. A request may already have been charged before Claude Code reports it; disable usage credits in the Claude account settings to prevent charges.
+
 ## 2026-10-10
 
 ### Added

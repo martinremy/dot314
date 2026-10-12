@@ -436,7 +436,7 @@ function tryParseJson(path) {
     return {};
   }
 }
-var USER_SCOPE_ONLY_PROVIDER_KEYS = ["enableConnectors", "connectorWriteMode", "inheritAnthropicEnv"];
+var USER_SCOPE_ONLY_PROVIDER_KEYS = ["enableConnectors", "connectorWriteMode", "inheritAnthropicEnv", "allowUsageCredits"];
 function stripUserScopeOnlyProviderKeys(config2) {
   if (!config2.provider) return config2;
   const provider = { ...config2.provider };
@@ -509,6 +509,7 @@ function normalizeProviderConfig(provider) {
   if (connectorWriteMode) out.connectorWriteMode = connectorWriteMode;
   else delete out.connectorWriteMode;
   if (typeof raw.inheritAnthropicEnv !== "boolean") delete out.inheritAnthropicEnv;
+  if (boolFrom(raw, "allowUsageCredits") !== true) delete out.allowUsageCredits;
   return out;
 }
 function configFile(path) {
@@ -3048,6 +3049,7 @@ function summarizeMissingToolNames(missing) {
 var REBUILD_MARKS = [
   "abort",
   "idle-timeout",
+  "usage-credits",
   "history-replaced",
   "history-rewritten",
   "user-unresolved",
@@ -49492,9 +49494,19 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
         settleReportedToolCalls(message, queryCtx);
         break;
       case "rate_limit_event": {
-        if (!streamLive) break;
         const info = message.rate_limit_info;
         debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+        const allowUsageCredits = Boolean(bridgeConfig.provider) && bridgeConfig.provider.allowUsageCredits === true;
+        if (info.isUsingOverage === true && !allowUsageCredits) {
+          holdFailure({
+            kind: "usage-credits",
+            message: "Claude bridge billing: stopped because Claude Code reported usage credits instead of plan limits. Set provider.allowUsageCredits to true in your user claude-bridge.json to allow this. The current request may already have been charged; disable usage credits in your Claude account settings to prevent charges."
+          });
+          debug("consumeQuery: usage credits blocked by user billing policy");
+          abortSdkQuery(sdkQuery2);
+          return { capturedSessionId, failure };
+        }
+        if (!streamLive) break;
         if (info?.status === "rejected") {
           const rateLimitType = rateLimitTypeFromInfo(info);
           const resetAt = rateLimitResetFromInfo(info);
@@ -50543,13 +50555,16 @@ function startFreshQuery(fresh, syncResult) {
   let accountFailureRecorded = false;
   const recordAttemptFailure = (failure) => {
     if (accountFailureRecorded || !account || !router || !failure.kind || failure.rateLimitInfo || wasAborted || options?.signal?.aborted) return;
-    safeRouterCall("recordFailure", () => router.recordFailure(account.profileId, failure.kind, queryModel.id));
+    const kind = failure.kind;
+    if (kind === "usage-credits") return;
+    safeRouterCall("recordFailure", () => router.recordFailure(account.profileId, kind, queryModel.id));
     accountFailureRecorded = true;
   };
   const requestAbort = () => {
     abortSdkQuery(abortCtx.activeQuery ?? sdkQuery2);
   };
   const requestRotation = (failure) => {
+    if (failure.kind === "usage-credits") return false;
     recordAttemptFailure(failure);
     const committed = abortCtx.committedOutput || attemptBuffer?.hasCommittedOutput === true;
     const eligible = Boolean(account && router && failure.kind && !committed && !wasAborted && !options?.signal?.aborted && !abortCtx.sessionEnded && rotationState.attempts < MAX_ROTATION_ATTEMPTS);
@@ -50660,6 +50675,13 @@ function startFreshQuery(fresh, syncResult) {
   };
   let reentryStream = stream;
   consumeQuery(sdkQuery2, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, account, router, attemptFailure).then(async ({ capturedSessionId, failure }) => {
+    if (Boolean(failure) && failure.kind === "usage-credits" && Boolean(abortCtx.restartRequest)) {
+      const restart = abortCtx.restartRequest;
+      abortCtx.restartRequest = null;
+      abortCtx.currentPiStream = restart.stream;
+      abortCtx.resetTurnState(restart.model);
+      abortCtx.listenForAbort(Boolean(restart.options) ? restart.options.signal : void 0);
+    }
     if (Boolean(abortCtx.restartRequest)) return;
     debug(`provider: consumeQuery completed, stopReason=${abortCtx.turnOutput?.stopReason}, failure=${failure?.kind ?? "none"}, aborted=${wasAborted}`);
     if (streamIdleTimedOut) {
@@ -50685,6 +50707,7 @@ function startFreshQuery(fresh, syncResult) {
         debug(`provider: terminal failure, persisting session=${failedSessionId.slice(0, 8)}, cursor=${cursor}, account=${account?.label ?? "legacy"}, droppedSteers=${droppedSteers.length}`);
         persistSession({ sessionId: failedSessionId, cursor, cwd, ...accountScope, ...droppedSteers.length > 0 ? { needsRebuild: true, rebuildReason: "dropped-steers" } : {} });
       }
+      if (failure.kind === "usage-credits") markRebuildForThisQuery({ reason: "usage-credits", forceRotate: true });
       return;
     }
     const activeSession = getSharedSession();
@@ -50719,6 +50742,7 @@ function startFreshQuery(fresh, syncResult) {
           if (continuation.failure) {
             recordAttemptFailure(continuation.failure);
             if (!abortCtx.handledTerminalError) surfaceFailure(continuation.failure);
+            if (continuation.failure.kind === "usage-credits") markRebuildForThisQuery({ reason: "usage-credits", forceRotate: true });
             if (dropDeferredUserMessages("continuation-failure", steer).length > 0) {
               markRebuildForThisQuery({ reason: "dropped-steers" });
             }

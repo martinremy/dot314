@@ -22,7 +22,7 @@ import { noteAnomaly } from "./agent-notice.ts";
 import { modelDisplayName } from "./models.ts";
 import { type QueryContext } from "./query-state.ts";
 import { RATE_LIMIT_AUTO_RESUME_EVENT, RATE_LIMIT_TOKEN, formatAllowedRateLimitWarning, formatResetTimestamp, isUsageLimitMessage, uniqueNonEmptyLines } from "./rate-limit.ts";
-import { sdkQueryAbandoned } from "./query-teardown.ts";
+import { abortSdkQuery, sdkQueryAbandoned } from "./query-teardown.ts";
 import { activeStreamIdleWatchdogs } from "./stream-idle-watchdog.ts";
 import { logClaudeCodeVersion } from "./versions.ts";
 
@@ -79,7 +79,7 @@ function noteFastModeDisabledReason(message: unknown, bridgeConfig: Config): voi
  *  whichever path handles it first (processStreamEvent or processAssistantMessage),
  *  and the MCP handler blocks the generator until pi delivers the tool result. */
 export interface ClaudeAttemptFailure {
-	kind?: ClaudeAccountFailureKind;
+	kind?: ClaudeAccountFailureKind | "usage-credits";
 	message: string;
 	rateLimitInfo?: Record<string, unknown>;
 }
@@ -353,9 +353,20 @@ export async function consumeQuery(
 				settleReportedToolCalls(message, queryCtx);
 				break;
 			case "rate_limit_event": {
-				if (!streamLive) break;
-				const info = (message as any).rate_limit_info as Record<string, unknown> | undefined;
+				const info = message.rate_limit_info;
 				debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+				// Billing policy applies even while Pi has the tool turn and no stream is live.
+				const allowUsageCredits = Boolean(bridgeConfig.provider) && bridgeConfig.provider.allowUsageCredits === true;
+				if (info.isUsingOverage === true && !allowUsageCredits) {
+					holdFailure({
+						kind: "usage-credits",
+						message: "Claude bridge billing: stopped because Claude Code reported usage credits instead of plan limits. Set provider.allowUsageCredits to true in your user claude-bridge.json to allow this. The current request may already have been charged; disable usage credits in your Claude account settings to prevent charges.",
+					});
+					debug("consumeQuery: usage credits blocked by user billing policy");
+					abortSdkQuery(sdkQuery);
+					return { capturedSessionId, failure };
+				}
+				if (!streamLive) break;
 				if (info?.status === "rejected") {
 					const rateLimitType = rateLimitTypeFromInfo(info);
 					const resetAt = rateLimitResetFromInfo(info);

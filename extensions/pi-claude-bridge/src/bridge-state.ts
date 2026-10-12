@@ -10,7 +10,7 @@ import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairin
 /** Why a record was marked needsRebuild, for the debug log's syncResult and
  *  timing lines. */
 export const REBUILD_MARKS = [
-	"abort", "idle-timeout", "history-replaced", "history-rewritten", "user-unresolved",
+	"abort", "idle-timeout", "usage-credits", "history-replaced", "history-rewritten", "user-unresolved",
 	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified", "host-resumed",
 ] as const;
 export type RebuildMark = typeof REBUILD_MARKS[number];

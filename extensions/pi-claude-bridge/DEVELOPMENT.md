@@ -72,6 +72,8 @@ Only a session a person types into is told. Pi's `input` event fires before `bef
 
 `src/rate-limit.ts::normalizeRateLimitUtilization` reads a value in `(0, 1]` as a fraction and `(1, 100]` as a percent; exactly `1` is ambiguous and resolves to full, the fail-closed direction. `formatAllowedRateLimitWarning` emits a neutral toast from `ALLOWED_RATE_LIMIT_WARNING_UTILIZATION_THRESHOLD` up and never quotes a `% used` figure. Rate-limit errors are deduplicated before notification and emitted as `pi-claude:rate-limit`.
 
+Usage credits require `provider.allowUsageCredits: true` in the user `claude-bridge.json`. `src/consume-query.ts` checks `rate_limit_event.rate_limit_info.isUsingOverage` even while Pi executes tools and no response stream is active. Detection interrupts the SDK query and returns a `usage-credits` failure, which enforces the user's billing choice rather than indicating an account failure. It never rotates profiles or emits the rate-limit event used for automatic resumption. A pending history restart ends with the billing error, and deferred continuations stop. Existing failure handling retains completed replies and reports a failure after a delivered tool turn through its result callback. The interrupted session is marked for a rebuild with a new Claude session id, because its child may still write to the old transcript. `tests/unit-usage-credits.mjs` and `tests/unit-continuation-failure.mjs` exercise these paths offline; the guard cannot prevent a charge made before the event arrives.
+
 ## Tests
 
 ```bash
