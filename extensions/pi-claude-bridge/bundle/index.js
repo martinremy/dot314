@@ -49246,6 +49246,51 @@ var BRIDGE_ACCOUNT_HOST = {
   probeProfile: probeClaudeAccountProfile
 };
 
+// src/model-discovery.ts
+var MODEL_DISCOVERY_TIMEOUT_MS = 1e4;
+async function discoverClaudeModels(cwd, account, signal) {
+  if (Boolean(signal)) signal.throwIfAborted();
+  const config2 = loadConfig(cwd);
+  const executable = resolveClaudeExecutable(config2.provider.pathToClaudeCodeExecutable);
+  if (executable) preflightClaudeExecutable(executable, cwd);
+  const controller = new AbortController();
+  let closeInput;
+  const inputClosed = new Promise((resolve4) => {
+    closeInput = resolve4;
+  });
+  async function* input() {
+    await inputClosed;
+  }
+  const options = {
+    cwd,
+    abortController: controller,
+    persistSession: false,
+    settingSources: [],
+    strictMcpConfig: true,
+    tools: [],
+    mcpServers: {},
+    permissionMode: "dontAsk",
+    env: { ...claudeChildEnv(account, config2.provider.inheritAnthropicEnv), ENABLE_CLAUDEAI_MCP_SERVERS: "0" },
+    spawnClaudeCodeProcess: spawnClaudeCodeWithDiagnostics
+  };
+  if (executable) options.pathToClaudeCodeExecutable = executable;
+  const probe = sdkQuery({ prompt: input(), options });
+  const cancelled = new Promise((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+  });
+  const cancel = () => controller.abort(signal.reason);
+  if (Boolean(signal)) signal.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error("Claude Code model discovery timed out")), MODEL_DISCOVERY_TIMEOUT_MS);
+  try {
+    return structuredClone(await Promise.race([probe.supportedModels(), cancelled]));
+  } finally {
+    clearTimeout(timer);
+    if (Boolean(signal)) signal.removeEventListener("abort", cancel);
+    closeInput();
+    closeSdkQuery(probe);
+  }
+}
+
 // src/bridge-commands.ts
 var COMMANDS_REGISTERED_KEY = /* @__PURE__ */ Symbol.for("claude-bridge:commandsRegistered");
 function commandCwd(ctx2) {
@@ -49258,6 +49303,28 @@ function showBridgeStatus(ctx2) {
     `Pi Claude: ${config2.enabled === false ? "disabled" : "enabled"}`,
     "Claude account billing settings (including Extra Usage) are managed in Claude."
   ].join("\n"), "info");
+}
+async function reportModelCatalog(ctx2) {
+  const router = resolveClaudeAccountRouter();
+  const account = Boolean(ctx2.model) && Boolean(router) ? router.current(ctx2.model.id, ctx2.sessionManager.getSessionId()) : void 0;
+  if (Boolean(router) && !Boolean(account)) {
+    ctx2.ui.notify("Pi Claude: no managed account is selected. Run a Pi Claude turn first, then request its model catalog.", "warning");
+    return;
+  }
+  const accountLabel = Boolean(account) ? account.label : "Claude Code login";
+  const signal = "signal" in ctx2 && ctx2.signal instanceof AbortSignal ? ctx2.signal : void 0;
+  try {
+    const offered = await discoverClaudeModels(commandCwd(ctx2), account, signal);
+    const lines = offered.map((model) => {
+      const id = model.resolvedModel ?? model.value;
+      const canonical = id.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
+      return `${model.displayName}: ${model.value} \u2192 ${id}${MODEL_IDS_IN_ORDER.includes(canonical) ? "" : " (not listed in bridge)"}`;
+    });
+    ctx2.ui.notify([`Pi Claude picker catalog (${accountLabel}):`, ...lines, "Picker entries are not a complete entitlement check."].join("\n"), "info");
+  } catch {
+    if (Boolean(signal) && signal.aborted) ctx2.ui.notify("Pi Claude: model discovery cancelled.", "info");
+    else ctx2.ui.notify("Pi Claude: model discovery failed. Check the Claude Code executable and login, then retry /pi-claude models.", "error");
+  }
 }
 async function reportConnectorInventory(ctx2) {
   const account = ctx2.model ? resolveClaudeAccountRouter()?.current(ctx2.model.id, ctx2.sessionManager?.getSessionId?.()) : void 0;
@@ -49283,9 +49350,10 @@ function registerBridgeCommands(pi2) {
   if (guard[COMMANDS_REGISTERED_KEY]) return;
   guard[COMMANDS_REGISTERED_KEY] = true;
   pi2.registerCommand("pi-claude", {
-    description: "Show Pi Claude status",
+    description: "Show Pi Claude status or its Claude Code model catalog",
     handler: async (args, ctx2) => {
-      if (args.trim()) ctx2.ui.notify("Unknown /pi-claude argument.", "warning");
+      if (args.trim() === "models") await reportModelCatalog(ctx2);
+      else if (args.trim()) ctx2.ui.notify("Unknown /pi-claude argument.", "warning");
       else showBridgeStatus(ctx2);
     }
   });

@@ -2,11 +2,13 @@
 // connector-inventory report. Extracted from index.ts (pure move).
 
 import { type Model } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { accountSessionScope, resolveClaudeAccountRouter } from "./account-router.ts";
 import { loadConfig } from "./config.ts";
 import { listAccountConnectors, resolveClaudeOAuth } from "./connector-inventory.ts";
 import { connectorCredentialEnv, readCredentialFile } from "./connector-runtime.ts";
+import { discoverClaudeModels } from "./model-discovery.ts";
+import { MODEL_IDS_IN_ORDER } from "./models.ts";
 
 const COMMANDS_REGISTERED_KEY = Symbol.for("claude-bridge:commandsRegistered");
 
@@ -21,6 +23,29 @@ function showBridgeStatus(ctx: { ui: ExtensionUIContext; cwd?: string }): void {
 		`Pi Claude: ${config.enabled === false ? "disabled" : "enabled"}`,
 		"Claude account billing settings (including Extra Usage) are managed in Claude.",
 	].join("\n"), "info");
+}
+
+async function reportModelCatalog(ctx: ExtensionCommandContext): Promise<void> {
+	const router = resolveClaudeAccountRouter();
+	const account = Boolean(ctx.model) && Boolean(router) ? router.current(ctx.model.id, ctx.sessionManager.getSessionId()) : undefined;
+	if (Boolean(router) && !Boolean(account)) {
+		ctx.ui.notify("Pi Claude: no managed account is selected. Run a Pi Claude turn first, then request its model catalog.", "warning");
+		return;
+	}
+	const accountLabel = Boolean(account) ? account.label : "Claude Code login";
+	const signal = "signal" in ctx && ctx.signal instanceof AbortSignal ? ctx.signal : undefined;
+	try {
+		const offered = await discoverClaudeModels(commandCwd(ctx), account, signal);
+		const lines = offered.map(model => {
+			const id = model.resolvedModel ?? model.value;
+			const canonical = id.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
+			return `${model.displayName}: ${model.value} → ${id}${MODEL_IDS_IN_ORDER.includes(canonical) ? "" : " (not listed in bridge)"}`;
+		});
+		ctx.ui.notify([`Pi Claude picker catalog (${accountLabel}):`, ...lines, "Picker entries are not a complete entitlement check."].join("\n"), "info");
+	} catch {
+		if (Boolean(signal) && signal.aborted) ctx.ui.notify("Pi Claude: model discovery cancelled.", "info");
+		else ctx.ui.notify("Pi Claude: model discovery failed. Check the Claude Code executable and login, then retry /pi-claude models.", "error");
+	}
 }
 
 // Deterministic connector enumeration for the host app. Reports the
@@ -60,9 +85,10 @@ export function registerBridgeCommands(pi: ExtensionAPI): void {
 	guard[COMMANDS_REGISTERED_KEY] = true;
 
 	pi.registerCommand("pi-claude", {
-		description: "Show Pi Claude status",
+		description: "Show Pi Claude status or its Claude Code model catalog",
 		handler: async (args: string, ctx) => {
-			if (args.trim()) ctx.ui.notify("Unknown /pi-claude argument.", "warning");
+			if (args.trim() === "models") await reportModelCatalog(ctx);
+			else if (args.trim()) ctx.ui.notify("Unknown /pi-claude argument.", "warning");
 			else showBridgeStatus(ctx);
 		},
 	});

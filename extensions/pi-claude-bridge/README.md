@@ -128,6 +128,8 @@ Claude Sonnet 5.5 (`pi-claude/claude-sonnet-5-5`) requires [Claude Code 2.1.284 
 
 The bridge reads `claude-bridge.json` from `~/.pi/agent` and from a trusted project's `.pi/` directory. `PI_CODING_AGENT_DIR` changes the user directory. Run `/pi-claude` to show the provider's current status.
 
+Run `/pi-claude models` to inspect the models in the installed Claude Code account's picker. With managed accounts, it uses the profile selected for the current session and model. The command identifies entries missing from the bridge's model list and makes no model request. Picker entries are not a complete entitlement check; Pi's model list remains the bridge's supported list.
+
 The bridge's `systemPrompt` configuration is independent of `anthropic-oauth-compat`, which continues to read `anthropicOAuthCompat` from `settings.json`.
 
 - `enabled`: register the `pi-claude/*` models; reload required.
