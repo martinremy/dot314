@@ -143,15 +143,6 @@ type SessionRecord = {
     tokensBefore?: number;
 };
 
-function truncateText(text: string, maxChars: number): string {
-    const normalized = text ?? "";
-    if (normalized.length <= maxChars) {
-        return normalized;
-    }
-
-    return normalized.slice(0, maxChars) + `... (${normalized.length - maxChars} more chars)`;
-}
-
 function extractTextFromContent(content: unknown): string {
     if (typeof content === "string") {
         return content.trim();
@@ -341,44 +332,21 @@ async function buildPriorCompactionsAddendum(ctx: ExtensionCommandContext): Prom
     try {
         const compactions = await loadCompactionRecords(sessionPath);
 
-        // Drop the most recent compaction: the current model likely already has it in view
-        const prior = compactions.slice(0, Math.max(0, compactions.length - 1));
-        if (prior.length === 0) {
+        // The current model likely already has the latest compaction in view. Each compaction summary carries the
+        // previous one forward, so the one before it, in full, stands in for all older summaries.
+        const record = compactions.at(-2);
+        if (!record) {
             return "";
         }
 
-        const maxPerSummaryChars = 4000;
-        const maxTotalChars = 12000;
-
-        const lines: string[] = [];
-        lines.push("## Prior compaction summaries");
-        lines.push("");
-
-        let used = 0;
-        for (let i = prior.length - 1; i >= 0; i -= 1) {
-            const record = prior[i];
-            // The fresh files-touched list supersedes ledgers saved with older summaries
-            const summary = (record.summary ?? "").trimEnd().replace(COMPACTION_LEDGER_TAIL_PATTERN, "").trim();
-            if (!summary) {
-                continue;
-            }
-
-            const header = `- [#${record.entryIndex}]`;
-            const compactedFrom = typeof record.tokensBefore === "number" ? ` (from ${record.tokensBefore.toLocaleString()} tokens)` : "";
-            const block = `${header}${compactedFrom}\n\n${truncateText(summary, maxPerSummaryChars)}`;
-
-            if (used + block.length > maxTotalChars) {
-                lines.push("- (older compaction summaries omitted due to size cap)");
-                break;
-            }
-
-            lines.push(block);
-            lines.push("");
-            used += block.length;
+        // The fresh files-touched list supersedes ledgers saved with older summaries
+        const summary = (record.summary ?? "").trimEnd().replace(COMPACTION_LEDGER_TAIL_PATTERN, "").trim();
+        if (!summary) {
+            return "";
         }
 
-        const hasContent = lines.length > 2;
-        return hasContent ? lines.join("\n").trim() : "";
+        const compactedFrom = record.tokensBefore === undefined ? "" : ` (from ${record.tokensBefore.toLocaleString()} tokens)`;
+        return `## Prior compaction summary\n\n- [#${record.entryIndex}]${compactedFrom}\n\n${summary}`;
     } catch {
         return "";
     }

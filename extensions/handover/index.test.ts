@@ -178,7 +178,7 @@ describe("handover files-touched audiences", () => {
         }
     });
 
-    it("handover strips prior compaction ledgers before truncation", async () => {
+    it("handover includes the previous compaction summary in full without its ledger", async () => {
         const manyFiles = Array.from({ length: 300 }, (_, index): FilesTouchedEntry => ({
             path: `/repo/src/module-${index}.ts`,
             displayPath: `src/module-${index}.ts`,
@@ -197,8 +197,8 @@ describe("handover files-touched audiences", () => {
             ],
         });
         const prompt = run.prompts[0];
-        assert.match(prompt, /## Prior compaction summaries\n/);
-        assert.match(prompt, /Older body/);
+        assert.match(prompt, /## Prior compaction summary\n/);
+        assert.doesNotMatch(prompt, /Older body/);
         assert.match(prompt, /Middle body/);
         assert.match(prompt, /src\/kept\.ts/);
         assert.ok(!prompt.includes(LEDGER_LEGEND));
@@ -209,6 +209,6 @@ describe("handover files-touched audiences", () => {
             configText: '{"autoSubmitSeconds": 0, "includeFilesTouched": "off"}',
             compactionSummaries: [cumulativeLedger, "latest"],
         });
-        assert.doesNotMatch(ledgerOnly.prompts[0], /## Prior compaction summaries/);
+        assert.doesNotMatch(ledgerOnly.prompts[0], /## Prior compaction summary/);
     });
 });
