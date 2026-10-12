@@ -404,7 +404,7 @@ function buildHandoverInstructionPrompt(params: {
     parts.push("- output only the final handover message in markdown");
     parts.push("- do not add a document title; the final handover will be titled by the system");
     parts.push("- make it high-signal and self-contained; the agent reading it in the new session will have near-zero context");
-    parts.push("- the new session will not see the latest compaction summary or any branch summaries in your context; together with the conversation since, they are your main sources, so carry forward every item from them that is still valid (constraints, preferences, decisions, rejected paths, unexpected findings, open issues, exact paths, commands, and next steps) unless the later conversation made it obsolete");
+    parts.push("- the new session will not see the latest compaction summary or any branch summaries in your context; treat them as sources, not text to reproduce: check them for anything the sections below ask for that the next agent still needs (constraints and preferences in force, decisions and rejected paths that prevent redone work, unresolved findings and open requests, exact paths and commands it must act on), include that, and leave out history, completed steps, and detail that would not change what the next agent does");
     parts.push(...FILES_TOUCHED_CONSTRAINTS[ledger.mode]);
     parts.push("");
     parts.push(`# Purpose\n${purpose.trim()}`);
