@@ -231,6 +231,7 @@
   - `/files-touched` shows files read/written/edited in the active session branch and opens the selected file in VS Code
   - This version extends the upstream original to also detect file reads/edits/writes performed through the tools of `repoprompt-mcp` and `repoprompt-cli` (`rp`, `rp_exec`) and their `read_file` / `file_actions create` / `apply_edits` actions
   - Codex coverage includes recognized shell operations through `exec_command` and structured `apply_patch` changes
+  - File tools called from Pi `codemode` scripts are tracked from the call record Pi saves with each `codemode` result
   - It also normalizes relative, root-prefixed, and absolute spellings of the same file before rendering, and carries touched paths through tracked file moves
   - Shared core ([`_shared/files-touched-core.ts`](_shared/files-touched-core.ts)) also tracks bash-level file operations: `sed -i` (edit), `cp`/`rsync` (write destination), `tee`/`touch` (write), `patch` (edit), `curl -o`/`wget -O` (write), and shell output redirections to files (`>`, `>>`, `>|`, and file-descriptor forms such as `2>`, `2>>`, and `&>`)
 

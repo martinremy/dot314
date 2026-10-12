@@ -17,6 +17,14 @@ function entries<Details>(details: Details, id = "exec-1", isError = false) {
 	} }] satisfies SessionEntry[];
 }
 
+type ToolResultMessage = Extract<Extract<SessionEntry, { type: "message" }>["message"], { role: "toolResult" }>;
+
+function codemodeResult(id: string, nestedCalls: NonNullable<ToolResultMessage["nestedCalls"]>) {
+	return [{ id: `result-${id}`, parentId: null, timestamp: "2026-01-01T00:00:00.000Z", type: "message", message: {
+		role: "toolResult", toolName: "codemode", toolCallId: id, timestamp: 1, content: [], isError: false, nestedCalls,
+	} }] satisfies SessionEntry[];
+}
+
 function trace<Input, Details>(id: string, name: string, input: Input, status = "done", details?: Details) {
 	const text = name === "rp" ? "## File Actions ✅" : "ok";
 	return { id, name, input, status, result: { content: [{ type: "text", text }], details, isError: false } };
@@ -251,6 +259,38 @@ test("missing or truncated evidence warns without failing the enclosing tool", (
 	const saved = h.finish(snapshot([trace("lost", "edit", { path: "[value truncated]" })], "result", 1));
 	assert.deepEqual(collectFilesTouched(saved, cwd), []);
 	assert.equal(h.warnings.length, 1);
+});
+
+test("Pi codemode call records attribute completed file tools like direct calls", () => {
+	const files = collectFilesTouched(codemodeResult("cm-1", { complete: true, calls: [
+		{ id: "cm-1/1", name: "read", status: "ok", arguments: { path: "/project/a.ts" } },
+		{ id: "cm-1/2", name: "write", status: "ok", arguments: { path: "notes.md", content: "x" } },
+		{ id: "cm-1/3", name: "edit", status: "error", arguments: { path: "/project/failed.ts", edits: [] }, error: "no match" },
+		{ id: "cm-1/4", name: "bash", status: "ok", arguments: { command: "cd sub && mv old.ts new.ts" } },
+		{ id: "cm-1/5", name: "rp", status: "ok", arguments: { call: "apply_edits", args: { path: "/project/b.ts" } } },
+		{ id: "cm-1/6", name: "get_goal", status: "ok", arguments: {} },
+	] }), cwd);
+	assert.deepEqual(files.map((file) => [file.path, [...file.operations]]), [
+		["/project/a.ts", ["read"]], ["/project/notes.md", ["write"]], ["/project/sub/new.ts", ["move"]], ["/project/b.ts", ["edit"]],
+	]);
+});
+
+test("Pi codemode records that lost file-tool evidence report incomplete attribution", (t) => {
+	const warn = t.mock.method(console, "warn", () => {});
+	const files = collectFilesTouched([
+		...codemodeResult("cm-lossy", { complete: false, calls: [
+			{ id: "cm-lossy/1", name: "write", status: "ok", argumentsBytes: 9904 },
+			{ id: "cm-lossy/2", name: "read", status: "ok", arguments: { path: "/project/kept.ts" } },
+		] }),
+		...codemodeResult("cm-unfinished", { complete: true, calls: [
+			{ id: "cm-unfinished/1", name: "write", status: "unfinished", arguments: { path: "/project/maybe.ts", content: "x" } },
+		] }),
+		...codemodeResult("cm-patch", { complete: true, calls: [
+			{ id: "cm-patch/1", name: "apply_patch", status: "ok", arguments: { input: "*** Begin Patch\n*** Add File: p.ts\n+x\n*** End Patch" } },
+		] }),
+	], cwd);
+	assert.deepEqual(files.map((file) => [file.path, [...file.operations]]), [["/project/kept.ts", ["read"]]]);
+	assert.deepEqual(warn.mock.calls.map((call) => call.arguments[0].toolCallId), ["cm-lossy", "cm-unfinished", "cm-patch"]);
 });
 
 test("truncated read output does not make a known read incomplete", () => {

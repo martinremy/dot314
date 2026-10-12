@@ -1,3 +1,4 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import {
@@ -7,7 +8,9 @@ import {
 } from "./files-touched-contract.ts";
 
 type TraceBatch = { cellId: string; traces: unknown[]; dropped: number; terminal: boolean };
-type FileMessage = { role: string; toolCallId?: string; details?: unknown };
+type ToolResultMessage = Extract<Extract<SessionEntry, { type: "message" }>["message"], { role: "toolResult" }>;
+type NestedToolCalls = NonNullable<ToolResultMessage["nestedCalls"]>;
+type FileMessage = { role: string; toolCallId?: string; details?: unknown; nestedCalls?: NestedToolCalls };
 type NestedFileAction = { action: FileAction; message: FileMessage };
 type NestedFileActions = { actions: NestedFileAction[]; incompleteKeys: string[] };
 type CellState = {
@@ -159,14 +162,35 @@ function parseTrace(trace: Trace, cwd: string | null | undefined, parse: FileCal
 	return { version: 1, calls: [{ toolCallId: trace.id, actions }], incomplete };
 }
 
+/** Pi keeps each nested call's name, arguments, and status, never its result. */
+function readPiNestedCallEvidence(record: NestedToolCalls | undefined, cwd: string | null | undefined, parse: FileCallParser): FileEvidence | undefined {
+	if (!record) return undefined;
+	const evidence: FileEvidence = { version: 1, calls: [], incomplete: !record.complete };
+	for (const call of record.calls) {
+		if (!FILE_TOOLS.has(call.name) || call.status === "error") continue;
+		// apply_patch effects come only from result details, which this record never keeps.
+		if (call.status === "unfinished" || call.name === "apply_patch") {
+			evidence.incomplete = true;
+			continue;
+		}
+		const parsed = parse({
+			toolName: call.name, toolArguments: call.arguments, cwd,
+			toolResult: { content: undefined, details: undefined, isError: false },
+		});
+		evidence.calls.push({ toolCallId: call.id, actions: parsed.actions });
+		evidence.incomplete ||= parsed.incomplete;
+	}
+	return evidence;
+}
+
 function readMessageEvidence(message: FileMessage, cwd: string | null | undefined, parse: FileCallParser): FileEvidence | undefined {
 	const details = message.details;
-	if (!Check(MetadataSchema, details)) return undefined;
+	if (!Check(MetadataSchema, details)) return readPiNestedCallEvidence(message.nestedCalls, cwd, parse);
 	if (Object.hasOwn(details, "filesTouched")) {
 		return Check(FileEvidenceSchema, details.filesTouched) ? details.filesTouched : { version: 1, calls: [], incomplete: true };
 	}
 	const batch = readBatch({ details });
-	if (!batch || details.codeMode !== true) return undefined;
+	if (!batch || details.codeMode !== true) return readPiNestedCallEvidence(message.nestedCalls, cwd, parse);
 	const evidence: FileEvidence = { version: 1, calls: [], incomplete: batch.dropped > 0 };
 	for (const trace of batch.traces) {
 		if (!Check(TraceSchema, trace) || !FILE_TOOLS.has(trace.name)) continue;
@@ -177,7 +201,7 @@ function readMessageEvidence(message: FileMessage, cwd: string | null | undefine
 	return evidence;
 }
 
-/** Reads saved file records or pi-codex-conversion traces, deduplicated by nested call ID in message order. */
+/** Reads saved file records, pi-codex-conversion traces, or Pi's nested call records, deduplicated by nested call ID in message order. */
 export function collectNestedFileActions(messages: readonly FileMessage[], cwd: string | null | undefined, parse: FileCallParser): NestedFileActions {
 	const seen = new Set<string>();
 	const actions: NestedFileAction[] = [];
