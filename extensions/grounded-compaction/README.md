@@ -128,7 +128,7 @@ The user's freeform focus text from the `/tree` prompt is preserved in either mo
 
 For compaction, this extension fully owns the LLM call: it can select a different model via presets, control thinking level independently, and manage token budgets.  A session running Opus with a high thinkingLevel can compact cheaply with Gemini Flash.
 
-For branch summaries, Pi's `session_before_tree` hook only exposes prompt instruction overrides.  The extension cannot control model selection, thinking level, or token budgeting for branch summaries without mutating persistent session state.  Native branch summarization always uses the current session model with a fixed `maxTokens` of 2048 and no explicit reasoning level -- the thinking overhead is minimal, but the per-token cost of the base model still applies.  At this time of writing there is no way to select a cheaper model for branch summaries from an extension.
+For branch summaries, this extension sets the instructions that Pi's own branch summarizer receives, and Pi makes the summarization call. Branch summaries therefore run on the current session model with Pi's own output limit and reasoning settings, and the presets in `config.json` do not apply to them. Pi's `session_before_tree` hook can also accept a complete summary written by an extension, which would allow a cheaper model; this extension uses the instruction overrides instead.
 
 ## How compaction summaries are structured
 

@@ -1,20 +1,19 @@
 # handover
 
-A Pi extension that generates a rich handover / rehydration message, then forks the current session from its first user message (i.e., creates a child session that has no prior messages replicated from the parent) and pre-fills the new child session's editor with the handover draft.
+A Pi extension that generates a rich handover / rehydration message, then creates a child session linked to the current one (the child starts with none of the parent's messages) and pre-fills the child session's editor with the handover draft.
 
-Quick workflow for resetting the context window, while establishing fork lineage (so tools like `session_lineage` / `session_ask` can find ancestors, and so Pi's `/resume` picker visually displays the fork lineage across handovers), and continuing with a high-signal 'what we did + where to go next' message.
+Quick workflow for resetting the context window, while recording the session's lineage (so tools like `session_lineage` / `session_ask` can find ancestors, and so Pi's `/resume` picker visually displays the lineage across handovers), and continuing with a high-signal 'what we did + where to go next' message.
 
 Borrowing heavily from [pasky/pi-amplike](https://github.com/pasky/pi-amplike) and [damianpdr/pi-handoff](https://github.com/damianpdr/pi-handoff) (both inspired by Amp's /handoff feature), and [mitsuhiko's handoff prompt](https://github.com/mitsuhiko/agent-stuff/blob/main/commands/handoff.md), `handover` adds a few other constraints and features:
 
 - **Agent-generated draft (not `complete()`)**: generates the handover draft by sending a normal user message to the current session's agent (`pi.sendUserMessage(...)`), then extracting the assistant reply. This avoids a separate direct LLM call and uses the model you're already running.
-- **Fork-from-first workflow (lineage-preserving)**: uses `ctx.fork(firstUserEntryId)` rather than creating an unrelated new session, so the fork lineage is preserved.
+- **Linked child session (lineage-preserving)**: creates the child with `ctx.newSession({ parentSession })`, which records the current session file as the child's parent, so the lineage is preserved.
 - **Race-hardened draft extraction**: waits for a quiescent session (`ctx.isIdle()` + `!ctx.hasPendingMessages()`), embeds a per-run nonce in the generation prompt, and extracts the assistant message following that nonce-marked user entry.
 - **Structured continuation prompt**: uses a more opinionated handover prompt that separates verified status, decisions, surprises, rejected paths, observed facts vs inferences, mandatory reading, and concrete next steps, with guardrails against exhaustive file-list restatements
 - **Compaction-history addendum**: when the current branch has been compacted more than once, the compaction summary before the latest one is included in full in an addendum, labeled as such and without the files-touched list that grounded-compaction may have appended to it. The drafting model already has the latest summary and any branch summaries in its context, and is told to take from them what the handover sections ask for and the next agent still needs, because the child session starts without them.
 - **Files touched list**: deterministically computes a files-touched block from the same branch-history logic as [`files-touched`](../files-touched.ts), including explicit read/write/edit/move/delete markers across native Pi tools, `rp`, and `rp_exec`, presents that to the handover-generating model as a recall aid, and, when configured, also appends it to the child-session draft (see [Configuration](#configuration)).
 - **User-editable overrides**: supports `config.json` (auto-submit countdown and files-touched audience) and `prompt.md` (style guide) without editing TypeScript.
-- **Rewind integration (explicit + gated)**: when [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook) is installed, `handover` emits a `rewind:fork-preference` event requesting a conversation-only fork ("keep current files") for the fork it triggers.
-- **Designed to pair with `session-ask`**: because `/handover` creates a real fork (parentSession chain), the [`session-ask/`](../session-ask/) extension can (optionally, via its own config) inject a minimal "Fork lineage" hint into the system prompt after a fork, including the parent session path—so the agent can quickly call `session_ask`/`session_lineage` to consult parent history as needed.
+- **Designed to pair with `session-ask`**: because the child session records its parent (`parentSession`), the [`session-ask/`](../session-ask/) extension can (optionally, via its own config) inject a minimal "Fork lineage" hint into the child's system prompt, including the parent session path, so the agent can quickly call `session_ask`/`session_lineage` to consult parent history as needed.
 
 ## Features
 
@@ -24,13 +23,9 @@ The files-touched list covers supported tools run inside pi-codex-conversion Cod
   - purpose is optional (defaults to "continue from current milestone/state")
   - generates a handover draft using the **current session model** (no separate model selection)
   - gives the drafting model a files-touched list derived from the same logic as [`files-touched`](../files-touched.ts), unless `includeFilesTouched` is `"off"`
-  - forks from the **first user message** and switches into the child session
+  - creates a child session linked to the current one and switches into it
   - pastes the handover draft into the child session editor, with the same files-touched list appended verbatim when `includeFilesTouched` is `"writerAndReader"`
   - optional auto-submit countdown (cancelled by typing or `Esc`; `Enter` submits normally)
-
-- Optional integration with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook)
-  - if this extension is installed, `handover` requests a **conversation-only fork** ("keep current files")
-  - if it's not installed, `handover` still works normally
 
 ## Installation
 
@@ -53,7 +48,7 @@ The files-touched list covers supported tools run inside pi-codex-conversion Cod
 
 Notes:
 - If you omit the purpose, `handover` uses a default "continue from current milestone/state" purpose and does **not** prompt
-- The handover **generation prompt** is sent as a normal user message in the *parent* session before forking (so it will appear in that session's history)
+- The handover **generation prompt** is sent as a normal user message in the *parent* session before the child session is created (so it will appear in that session's history)
 - The generated draft is inserted into the **child session editor**
 - Auto-submit:
   - cancelled by typing anything or hitting `Esc`
@@ -105,5 +100,5 @@ You can start from:
 4. If the current branch has been compacted more than once: adds a **previous-compaction addendum** with the full summary before the latest one, without its files-touched list
 5. Sends that prompt as a normal user message (`pi.sendUserMessage(...)`) so the current session model produces the draft
 6. Waits for the assistant response and extracts the draft, including when generation takes longer than five minutes
-7. Finds the first user message entry ID and calls `ctx.fork(firstUserEntryId)`
-8. Normalizes the draft, prefixes a stable title, appends the same files-touched block when `includeFilesTouched` is `"writerAndReader"`, and starts the countdown (if enabled)
+7. Normalizes the draft, prefixes a stable title, and appends the same files-touched block when `includeFilesTouched` is `"writerAndReader"`
+8. Creates the child session with `ctx.newSession({ parentSession })`, pre-fills its editor with the draft, and starts the countdown (if enabled)
