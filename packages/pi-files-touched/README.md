@@ -30,7 +30,7 @@ Use absolute paths in `rp-cli` and `rpce-cli` shell commands. Relative and root-
 
 For saved traces that predate live completion tracking, RepoPrompt calls are recorded only when the trace still shows a successful result. Ambiguous outcomes are reported as incomplete rather than recorded as successful edits. Aborting an outer `exec` or `wait` retains confirmed operations and reports unfinished calls as incomplete.
 
-Supported path spellings are normalized and coalesced so the same file appears once regardless of how different tools referred to it. File moves are tracked and earlier references are carried forward to the final path.
+Supported path spellings are normalized and coalesced so the same file appears once regardless of how different tools referred to it. A leading `~` resolves to the home directory in `read`, `write`, and `edit` paths and in shell words that start with an unquoted `~`. File moves are tracked and earlier references are carried forward to the final path.
 
 ## Shared core for other extensions
 

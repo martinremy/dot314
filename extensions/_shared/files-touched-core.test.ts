@@ -526,6 +526,20 @@ test("collectFilesTouched resolves relative paths against an earlier cd in the s
 	}
 });
 
+test("collectFilesTouched expands a leading ~ where the shell and Pi file tools do", () => {
+	const home = os.homedir();
+	const record = (name: string, args: { path: string } | { command: string } | { cmd: string; workdir: string }) =>
+		collectFilesTouched([toolCall("1", name, args), toolResult("1", 1)], "/project").map((file) => file.path);
+	assert.deepEqual(record("read", { path: "~/notes.md" }), [`${home}/notes.md`]);
+	assert.deepEqual(record("bash", { command: "cat ~/bin/x.sh" }), [`${home}/bin/x.sh`]);
+	assert.deepEqual(record("bash", { command: "echo hi > ~/out.txt" }), [`${home}/out.txt`]);
+	assert.deepEqual(record("bash", { command: "cd ~/src && cat a.md" }), [`${home}/src/a.md`]);
+	assert.deepEqual(record("bash", { command: "cd ~ && cat a.md" }), [`${home}/a.md`]);
+	assert.deepEqual(record("bash", { command: 'cd "$DIR" && cat ~/kept.md' }), [`${home}/kept.md`]);
+	assert.deepEqual(record("exec_command", { cmd: "cat ~/e.txt", workdir: "pkg" }), [`${home}/e.txt`]);
+	assert.deepEqual(record("bash", { command: "cat '~/quoted.txt' \\~/escaped.txt" }), ["/project/~/quoted.txt", "/project/~/escaped.txt"]);
+});
+
 test("parseCompletedCodexFileActions rebases real operands and redirect destinations only", async () => {
 	assert.deepEqual(
 		await recordShellCommand("mv a.txt b.txt 2>err.log", { name: "exec_command", workdir: "pkg" }),

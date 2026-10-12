@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -120,6 +121,11 @@ function normalizeAbsolutePath(value: string): string {
 function isAbsolutePath(value: string): boolean {
 	const normalized = normalizePathSeparators(value.trim());
 	return normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized);
+}
+
+/** Expands a leading `~` or `~/` to the home directory, as the shell and Pi's file tools do */
+function expandHomeDirectory(value: string): string {
+	return value === "~" || value.startsWith("~/") ? `${os.homedir()}${value.slice(1)}` : value;
 }
 
 function resolvePathFromBase(pathValue: string, basePath: string | null | undefined): string {
@@ -490,12 +496,15 @@ function tokenizeShellCommand(cmd: string): string[] {
 	let current = "";
 	let quote: '"' | "'" | null = null;
 	let escaped = false;
+	// The shell expands ~ only when it starts a word unquoted
+	let unquotedTilde = false;
 
 	const flush = () => {
 		if (current) {
-			tokens.push(current);
+			tokens.push(unquotedTilde ? expandHomeDirectory(current) : current);
 			current = "";
 		}
+		unquotedTilde = false;
 	};
 
 	for (let index = 0; index < cmd.length; index += 1) {
@@ -539,6 +548,7 @@ function tokenizeShellCommand(cmd: string): string[] {
 			continue;
 		}
 
+		unquotedTilde ||= char === "~" && !current;
 		current += char;
 	}
 
@@ -1327,7 +1337,7 @@ function getTrackedToolActions(call: IncomingFileCall): FileAction[] {
 	if (!Check(OperationCallSchema, call)) return [];
 	if (call.toolName === "rp_exec") return parseRpExecActions(call.toolArguments.cmd);
 	if (call.toolName !== "rp") {
-		return [{ kind: "touch", path: call.toolArguments.path, operation: call.toolName }];
+		return [{ kind: "touch", path: expandHomeDirectory(call.toolArguments.path), operation: call.toolName }];
 	}
 	const rp = call.toolArguments;
 	if (rp.call !== "file_actions") {
