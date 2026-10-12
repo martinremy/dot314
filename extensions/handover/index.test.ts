@@ -45,15 +45,16 @@ async function runHandover(options: {
         await writeFile(configPath, options.configText, "utf8");
     }
     const sessionFile = path.join(tempDir, "session.jsonl");
-    await writeFile(
-        sessionFile,
-        (options.compactionSummaries ?? [])
-            .map((summary) => JSON.stringify({ type: "compaction", summary, tokensBefore: 1000 }))
-            .join("\n"),
-        "utf8",
-    );
 
-    const entries: SessionEntry[] = [];
+    const entries: SessionEntry[] = (options.compactionSummaries ?? []).map((summary, index) => ({
+        type: "compaction",
+        id: `compaction-${index}`,
+        parentId: null,
+        timestamp: new Date(0).toISOString(),
+        summary,
+        firstKeptEntryId: "first-kept",
+        tokensBefore: 1000,
+    }));
     const prompts: string[] = [];
     const notifications: Notification[] = [];
     const collectCalls: SessionEntry[][] = [];
@@ -178,7 +179,7 @@ describe("handover files-touched audiences", () => {
         }
     });
 
-    it("handover includes the previous compaction summary in full without its ledger", async () => {
+    it("handover includes the previous compaction summary on the branch in full without its ledger", async () => {
         const manyFiles = Array.from({ length: 300 }, (_, index): FilesTouchedEntry => ({
             path: `/repo/src/module-${index}.ts`,
             displayPath: `src/module-${index}.ts`,
@@ -193,22 +194,22 @@ describe("handover files-touched audiences", () => {
             compactionSummaries: [
                 `Older body\n\n---\n\n${cumulativeLedger}`,
                 `Middle body\n\n## Earlier section\n\nKept src/kept.ts\n\n${renderFilesTouchedManifestBlock([TRACKED_FILE])}`,
-                "latest",
+                "Latest body",
             ],
         });
         const prompt = run.prompts[0];
-        assert.match(prompt, /## Prior compaction summary\n/);
+        assert.match(prompt, /## Previous compaction summary\n/);
         assert.doesNotMatch(prompt, /Older body/);
         assert.match(prompt, /Middle body/);
         assert.match(prompt, /src\/kept\.ts/);
         assert.ok(!prompt.includes(LEDGER_LEGEND));
         assert.doesNotMatch(prompt, /more chars/);
-        assert.doesNotMatch(prompt, /\blatest\b/);
+        assert.doesNotMatch(prompt, /Latest body/);
 
         const ledgerOnly = await runHandover({
             configText: '{"autoSubmitSeconds": 0, "includeFilesTouched": "off"}',
-            compactionSummaries: [cumulativeLedger, "latest"],
+            compactionSummaries: [cumulativeLedger, "Latest body"],
         });
-        assert.doesNotMatch(ledgerOnly.prompts[0], /## Prior compaction summary/);
+        assert.doesNotMatch(ledgerOnly.prompts[0], /## Previous compaction summary/);
     });
 });

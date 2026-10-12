@@ -1,8 +1,6 @@
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import * as readline from "node:readline";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -135,14 +133,6 @@ type PendingHandoverDraft = {
     autoSubmitSeconds: number;
 };
 
-type SessionRecord = {
-    entryIndex: number;
-    type: string;
-    timestamp?: string;
-    summary?: string;
-    tokensBefore?: number;
-};
-
 function extractTextFromContent(content: unknown): string {
     if (typeof content === "string") {
         return content.trim();
@@ -232,51 +222,6 @@ async function loadConfig(configPath: string): Promise<ExtensionConfig> {
     }
 }
 
-async function loadCompactionRecords(sessionPath: string): Promise<SessionRecord[]> {
-    const records: SessionRecord[] = [];
-
-    const stream = fs.createReadStream(sessionPath, { encoding: "utf8" });
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-
-    const maxCompactionRecords = 20;
-
-    let entryIndex = 0;
-    for await (const line of rl) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-            continue;
-        }
-
-        let parsed: any;
-        try {
-            parsed = JSON.parse(trimmed);
-        } catch {
-            continue;
-        }
-
-        entryIndex += 1;
-
-        const recordType = typeof parsed?.type === "string" ? parsed.type : "unknown";
-        if (recordType !== "compaction") {
-            continue;
-        }
-
-        records.push({
-            entryIndex,
-            type: recordType,
-            timestamp: typeof parsed?.timestamp === "string" ? parsed.timestamp : undefined,
-            summary: typeof parsed?.summary === "string" ? parsed.summary : undefined,
-            tokensBefore: typeof parsed?.tokensBefore === "number" ? parsed.tokensBefore : undefined,
-        });
-
-        if (records.length > maxCompactionRecords) {
-            records.shift();
-        }
-    }
-
-    return records;
-}
-
 function getPendingHandoverPath(previousSessionFile: string): string {
     const hash = createHash("sha256").update(previousSessionFile).digest("hex");
     return path.join(PENDING_HANDOVER_DIR, `${hash}.json`);
@@ -323,33 +268,27 @@ async function clearPendingHandoverDraft(previousSessionFile: string): Promise<v
     }
 }
 
-async function buildPriorCompactionsAddendum(ctx: ExtensionCommandContext): Promise<string> {
-    const sessionPath = ctx.sessionManager.getSessionFile();
-    if (!sessionPath || !sessionPath.endsWith(".jsonl") || !fs.existsSync(sessionPath)) {
+function buildPriorCompactionAddendum(ctx: ExtensionCommandContext): string {
+    const compactions = ctx.sessionManager.getBranch().filter((entry) => entry.type === "compaction");
+    // The drafting model already has the latest compaction summary in its context. Each summary carries the
+    // previous one forward, so the one before it, in full, stands in for all older summaries.
+    const previous = compactions.at(-2);
+    if (!previous) {
         return "";
     }
 
-    try {
-        const compactions = await loadCompactionRecords(sessionPath);
-
-        // The current model likely already has the latest compaction in view. Each compaction summary carries the
-        // previous one forward, so the one before it, in full, stands in for all older summaries.
-        const record = compactions.at(-2);
-        if (!record) {
-            return "";
-        }
-
-        // The fresh files-touched list supersedes ledgers saved with older summaries
-        const summary = (record.summary ?? "").trimEnd().replace(COMPACTION_LEDGER_TAIL_PATTERN, "").trim();
-        if (!summary) {
-            return "";
-        }
-
-        const compactedFrom = record.tokensBefore === undefined ? "" : ` (from ${record.tokensBefore.toLocaleString()} tokens)`;
-        return `## Prior compaction summary\n\n- [#${record.entryIndex}]${compactedFrom}\n\n${summary}`;
-    } catch {
+    // The fresh files-touched list supersedes ledgers saved with older summaries
+    const summary = previous.summary.trimEnd().replace(COMPACTION_LEDGER_TAIL_PATTERN, "").trim();
+    if (!summary) {
         return "";
     }
+
+    return [
+        "## Previous compaction summary",
+        `This is the compaction summary before the latest one on this branch, from ${previous.tokensBefore.toLocaleString()} tokens. The latest summary is already in your context. Use this one only for still-relevant details that the latest summary and the later conversation do not cover; where they disagree, the later sources win.`,
+        "",
+        summary,
+    ].join("\n");
 }
 
 async function loadStyleGuide(): Promise<string> {
@@ -465,6 +404,7 @@ function buildHandoverInstructionPrompt(params: {
     parts.push("- output only the final handover message in markdown");
     parts.push("- do not add a document title; the final handover will be titled by the system");
     parts.push("- make it high-signal and self-contained; the agent reading it in the new session will have near-zero context");
+    parts.push("- the new session will not see the latest compaction summary or any branch summaries in your context; together with the conversation since, they are your main sources, so carry forward every item from them that is still valid (constraints, preferences, decisions, rejected paths, unexpected findings, open issues, exact paths, commands, and next steps) unless the later conversation made it obsolete");
     parts.push(...FILES_TOUCHED_CONSTRAINTS[ledger.mode]);
     parts.push("");
     parts.push(`# Purpose\n${purpose.trim()}`);
@@ -817,7 +757,7 @@ export default function (
         const purpose = args.trim() || "Continue from the current milestone/state with a clean child session and a rich rehydration message";
 
         const styleGuide = await loadStyleGuide();
-        const priorCompactionsAddendum = await buildPriorCompactionsAddendum(ctx);
+        const priorCompactionsAddendum = buildPriorCompactionAddendum(ctx);
 
         const draftResult = await generateHandoverDraftViaAgent({
             pi,

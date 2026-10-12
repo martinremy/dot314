@@ -281,7 +281,7 @@
     - Forks the session from its first message, creating parent-child lineage that helps with future discovery and tools like `session_lineage` and `session_ask`
     - Robust correlation: waits for a quiescent session + uses a per-run nonce to extract the correct assistant reply
     - Uses a more opinionated continuation prompt separating verified status, decisions, surprises, rejected paths, facts vs inferences, mandatory reading, and next steps, with guardrails against exhaustive file-list restatements
-    - Adds the compaction summary before the latest one, in full, from the current session JSONL when it exists
+    - Adds the compaction summary before the latest one on the current branch, in full, when it exists
     - Gives the drafting model a deterministic files-touched list derived from [`_shared/files-touched-core.ts`](_shared/files-touched-core.ts) (which covers Pi native tools, RepoPrompt tools, recognized shell operations through `bash` and `exec_command`, and structured `apply_patch` changes); `config.json` controls whether the same list is also appended to the child draft
     - If [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook) is installed, requests a conversation-only fork
   - Optional auto-submit countdown (typing or `Esc` cancels; `Enter` submits normally)
