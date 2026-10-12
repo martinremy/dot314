@@ -22,6 +22,7 @@ import { QueryContext, ctx, deleteQueryLane, detachContext, drainPendingToolCall
 import { answersKnownCall, deliverSteerBeforeResults, resolveToolResults } from "./tool-result-delivery.ts";
 import { abortSdkQuery, closeSdkQuery, teardownQuery } from "./query-teardown.ts";
 import { loadConfig, recordProjectTrust } from "./config.ts";
+import { systemInstructionHooks } from "./system-instructions.ts";
 import { hasClaudeCredentials } from "./auth-presence.ts";
 import { NATIVE_PROVIDER_UNSUPPORTED_MESSAGE, buildNativeProvider, supportsNativeProvider } from "./native-provider.ts";
 import { CLAUDE_CODE_TOOL_USE_ID, ServedToolServer, type ServedToolHandler } from "./served-tools.ts";
@@ -55,7 +56,7 @@ import {
 import { BRIDGE_ACCOUNT_HOST } from "./account-host.ts";
 import { registerBridgeCommands } from "./bridge-commands.ts";
 import { consumeQuery, emitRateLimitEvent, type ClaudeAttemptFailure } from "./consume-query.ts";
-import { buildClaudeQueryOptions } from "./query-options.ts";
+import { buildClaudeQueryOptions, outboundSystemPrompt } from "./query-options.ts";
 import { sdkQuery as startSdkQuery } from "./sdk-query.ts";
 import { UserMessageLedger, type ClassifyOptions } from "./user-message-ledger.ts";
 import { currentRequestLaneId, runInRequestLane } from "./request-lane.ts";
@@ -805,6 +806,7 @@ function streamRequestInLane(
 		const allResults = extractAllToolResults(context);
 		debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
 		syncServedTools(queryCtx, context);
+		if (Boolean(queryCtx.updateSystemInstructions)) queryCtx.updateSystemInstructions(context.messages);
 		const toolsSettling = queryCtx.servedToolsSettling;
 		// Results THIS callback delivers: new input, never an anchor for the
 		// user-message split below. Acknowledged once that split is done.
@@ -1144,6 +1146,7 @@ function streamRequestInLane(
 	// earlier history, wherever a context transform moves them.
 	ctx().ownedUserMessages = UserMessageLedger.fromHistory(context.messages);
 	ctx().acknowledgedToolResultIds.clear();
+	ctx().updateSystemInstructions = null;
 	ctx().userInputNeedsRebuild = false;
 	ctx().committedOutput = false;
 	ctx().piHistoryReplaced = false;
@@ -1447,6 +1450,22 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 		claudeExecutable,
 	});
 	const { queryOptions } = built;
+	const renderInstructions = (messages: Context["messages"]): string => {
+		const system = getCurrentSystemMessage(messages);
+		const sections = Boolean(system) ? system.sections : undefined;
+		return outboundSystemPrompt({
+			queryModel, bridgeConfig,
+			systemPrompt: getCurrentSystemPrompt(messages),
+			systemPromptOrigin: {
+				preamble: Boolean(sections) ? Boolean(sections.preamble) ? sections.preamble : "" : undefined,
+				sessionId: Boolean(options) ? options.sessionId : undefined,
+				cacheRetention: Boolean(options) ? options.cacheRetention : undefined,
+			},
+		}).prompt;
+	};
+	const instructions = systemInstructionHooks(renderInstructions(context.messages), renderInstructions);
+	attemptCtx.updateSystemInstructions = instructions.update;
+	queryOptions.hooks = { ...queryOptions.hooks, ...instructions.hooks };
 
 	debug("provider: fresh query",
 		`model=${queryModel.id} requested=${model.id} msgs=${context.messages.length} tools=${mcpTools.length}`,

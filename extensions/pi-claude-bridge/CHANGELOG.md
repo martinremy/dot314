@@ -4,6 +4,10 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ## 2026-10-11
 
+### Fixed
+
+- System instructions changed during a Pi tool call reach Claude's next response through SDK system-context hooks. Previously they took effect only when a new query started. New queries still send the current system prompt.
+
 ### Added
 
 - Usage credits require `provider.allowUsageCredits: true` in the user `claude-bridge.json`. Detection interrupts the Claude query and stops account rotation, history restarts and deferred continuations. A request may already have been charged before Claude Code reports it; disable usage credits in the Claude account settings to prevent charges.

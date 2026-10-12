@@ -1945,6 +1945,8 @@ var QueryContext = class {
    *  are classified, so that callback's own results are never anchors.
    *  Query-scoped, cleared at fresh-query setup. */
   acknowledgedToolResultIds = /* @__PURE__ */ new Set();
+  /** Updates the instructions delivered by the SDK hook after a tool call. */
+  updateSystemInstructions = null;
   /** A mid-query user message could not be identified (see
    *  UserMessageLedger.classify), so a rebuild owns it: the record this query
    *  persists must carry needsRebuild. */
@@ -4500,6 +4502,32 @@ function failSteeringDelivery(queryCtx, sdkQuery2, error51, live, piSession) {
   endStreamForFailure(queryCtx, { errorMessage: STEERING_DELIVERY_FAILED_MESSAGE });
   if (queryCtx.onRequestAbort) queryCtx.onRequestAbort();
   else abortSdkQuery(sdkQuery2);
+}
+
+// src/system-instructions.ts
+function systemInstructionHooks(initial, render) {
+  let current = initial;
+  let delivered = initial;
+  const take = async (input, _toolUseId, options) => {
+    if (options.signal.aborted || current === delivered) return {};
+    const text = current;
+    delivered = text;
+    if (input.hook_event_name !== "PostToolUse" && input.hook_event_name !== "PostToolUseFailure") {
+      throw new Error("Claude bridge: unexpected instruction hook event");
+    }
+    return { hookSpecificOutput: {
+      hookEventName: input.hook_event_name,
+      additionalContext: `Pi's current system instructions replace the previous instructions:
+
+${text}`
+    } };
+  };
+  return {
+    update(messages) {
+      current = render(messages);
+    },
+    hooks: { PostToolUse: [{ hooks: [take] }], PostToolUseFailure: [{ hooks: [take] }] }
+  };
 }
 
 // src/auth-presence.ts
@@ -50102,6 +50130,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
     const allResults = extractAllToolResults2(context);
     debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
     syncServedTools(queryCtx, context);
+    if (Boolean(queryCtx.updateSystemInstructions)) queryCtx.updateSystemInstructions(context.messages);
     const toolsSettling = queryCtx.servedToolsSettling;
     const deliveredResultIds = allResults.flatMap((result) => answersKnownCall(queryCtx, result.toolCallId) ? [result.toolCallId] : []);
     const releaseResults = () => resolveToolResults(queryCtx, allResults, toolsSettling, cwd);
@@ -50323,6 +50352,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
   ctx().claimedResultIds.clear();
   ctx().ownedUserMessages = UserMessageLedger.fromHistory(context.messages);
   ctx().acknowledgedToolResultIds.clear();
+  ctx().updateSystemInstructions = null;
   ctx().userInputNeedsRebuild = false;
   ctx().committedOutput = false;
   ctx().piHistoryReplaced = false;
@@ -50553,6 +50583,23 @@ function startFreshQuery(fresh, syncResult) {
     claudeExecutable
   });
   const { queryOptions } = built;
+  const renderInstructions = (messages) => {
+    const system = getCurrentSystemMessage(messages);
+    const sections = Boolean(system) ? system.sections : void 0;
+    return outboundSystemPrompt({
+      queryModel,
+      bridgeConfig,
+      systemPrompt: getCurrentSystemPrompt(messages),
+      systemPromptOrigin: {
+        preamble: Boolean(sections) ? Boolean(sections.preamble) ? sections.preamble : "" : void 0,
+        sessionId: Boolean(options) ? options.sessionId : void 0,
+        cacheRetention: Boolean(options) ? options.cacheRetention : void 0
+      }
+    }).prompt;
+  };
+  const instructions = systemInstructionHooks(renderInstructions(context.messages), renderInstructions);
+  attemptCtx.updateSystemInstructions = instructions.update;
+  queryOptions.hooks = { ...queryOptions.hooks, ...instructions.hooks };
   debug(
     "provider: fresh query",
     `model=${queryModel.id} requested=${model.id} msgs=${context.messages.length} tools=${mcpTools.length}`,

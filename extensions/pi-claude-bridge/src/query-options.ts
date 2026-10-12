@@ -84,7 +84,7 @@ interface OutboundSystemPrompt {
  * only that base replaced, whatever preservePiContext says: Anthropic refuses
  * it as it is, and the caller's own text must still reach Claude. The
  * preamble tells resolveSystemPrompt whether Pi built the base. */
-function outboundSystemPrompt(
+export function outboundSystemPrompt(
 	input: Pick<BuildClaudeQueryOptionsInput, "queryModel" | "bridgeConfig" | "systemPromptOrigin"> & { systemPrompt: string },
 ): OutboundSystemPrompt {
 	const { queryModel, bridgeConfig, systemPrompt, systemPromptOrigin } = input;
