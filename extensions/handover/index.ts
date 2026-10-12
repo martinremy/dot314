@@ -338,10 +338,11 @@ function renderFilesTouchedManifestBlock(files: FilesTouchedEntry[]): string {
 function stripModelAuthoredFilesTouchedTail(draft: string): string {
     let cleaned = draft.trimEnd();
 
+    // The fenced list must be the draft's last block, so its body may not contain another fence line
     const trailingPatterns = [
-        /\n{2,}---\n{1,}Files touched in this session[^\n]*:\n{1,}```text[\s\S]*?```\s*$/i,
-        /\n{2,}#{1,6}\s+Files touched[^\n]*\n(?:[^\n]*\n)*?```text[\s\S]*?```\s*$/i,
-        /\n{2,}Files touched in this session[^\n]*:\n{1,}```text[\s\S]*?```\s*$/i,
+        /\n{2,}---\n{1,}Files touched in this session[^\n]*:\n{1,}```text(?:(?!\n```)[\s\S])*\n```\s*$/i,
+        /\n{2,}#{1,6}\s+Files touched[^\n]*\n(?:(?!```|#)[^\n]*\n)*```text(?:(?!\n```)[\s\S])*\n```\s*$/i,
+        /\n{2,}Files touched in this session[^\n]*:\n{1,}```text(?:(?!\n```)[\s\S])*\n```\s*$/i,
     ];
 
     let changed = true;

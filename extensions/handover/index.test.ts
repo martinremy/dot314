@@ -37,6 +37,8 @@ async function runHandover(options: {
     compactionSummaries?: string[];
     /** Cancels child creation, which clears the pending draft without starting an auto-submit countdown */
     cancelChildSession?: boolean;
+    /** The simulated model's reply; defaults to a draft body followed by a model-authored files-touched list */
+    draft?: string;
 }) {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "handover-test-"));
     tempDirs.push(tempDir);
@@ -79,7 +81,7 @@ async function runHandover(options: {
                 {
                     id: `assistant-${prompts.length}`,
                     type: "message",
-                    message: { role: "assistant", content: [{ type: "text", text: `${DRAFT_BODY}\n\n${MODEL_AUTHORED_TAIL}` }] },
+                    message: { role: "assistant", content: [{ type: "text", text: options.draft ?? `${DRAFT_BODY}\n\n${MODEL_AUTHORED_TAIL}` }] },
                 } as SessionEntry,
             );
         },
@@ -157,6 +159,18 @@ describe("handover files-touched audiences", () => {
         assert.equal(writerAndReader.collectCalls.length, 1);
         assert.match(writerAndReader.prompts[0], /appended verbatim/);
         assert.equal(writerAndReader.editorText, `# Handover message\n\n${DRAFT_BODY}\n\n${block}`);
+    });
+
+    it("handover strips a model-authored files-touched list only when it ends the draft", async () => {
+        const nextSteps = "## Next steps\nRun the suite:\n\n```text\nnpm test\n```";
+        const labeledList = "Files touched in this session:\n\n```text\nE  src/parser.ts\n```";
+        for (const draft of [
+            `${DRAFT_BODY}\n\n${MODEL_AUTHORED_TAIL}\n\n${nextSteps}`,
+            `${DRAFT_BODY}\n\n${labeledList}\n\n${nextSteps}`,
+        ]) {
+            const run = await runHandover({ configText: '{"autoSubmitSeconds": 0, "includeFilesTouched": "writer"}', draft });
+            assert.equal(run.editorText, `# Handover message\n\n${draft}`);
+        }
     });
 
     it("handover rejects invalid configuration before drafting", async () => {
