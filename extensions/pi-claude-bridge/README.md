@@ -4,7 +4,7 @@ A Pi provider that uses a logged-in Claude Code account through the Claude Agent
 
 Requires Pi 0.86.0 or later and Node.js 22.19.0 or later.
 
-This is a fork of [vanillagreen's `@vanillagreen/pi-claude-bridge` in Kendex](https://github.com/vanillagreencom/kendex/tree/main/pi-extensions/pi-claude-bridge), which descends from [Eli Dickinson's `pi-claude-bridge`](https://github.com/elidickinson/pi-claude-bridge). [nicobailon](https://github.com/nicobailon/) has contributed several tool, stream and session fixes described below. See [Differences from Kendex upstream](#differences-from-kendex-upstream) for the comparison.
+This is a fork of [vanillagreen's `@vanillagreen/pi-claude-bridge` in Kendex](https://github.com/vanillagreencom/kendex/tree/main/pi-extensions/pi-claude-bridge), which descends from [Eli Dickinson's `pi-claude-bridge`](https://github.com/elidickinson/pi-claude-bridge). Further tool, stream and session improvements are developed in collaboration with [nicobailon](https://github.com/nicobailon/). See [Differences from Kendex upstream](#differences-from-kendex-upstream) for the comparison.
 
 ## How it works
 
@@ -96,6 +96,8 @@ Claude Code's own file, shell and web tools are turned off. The bridge serves Pi
 ```
 
 A rebuild keeps as much of Claude Code's own transcript as it can. When that transcript still holds the start of Pi's history with the same content, as it does after you press Esc, the bridge copies those records as they are into the new session and writes only the rest from Pi's history. Claude Code then sends the same request bytes as before, and the prompt cache still covers that part.
+
+A forked Pi session can copy a verified prefix of its parent's Claude transcript into a separate transcript in the child's working directory. Cache reuse also depends on matching system prompts and tool definitions. Rebuilds retain re-encoded images when saved originals verify their content, and retain calls Claude Code answered itself. If Claude gives no model response on a retry after an unanswered attempt, the bridge stops automatic retries and suggests `/compact`.
 
 The bridge saves which Claude Code session belongs to the Pi session in the Pi session file, so reopening a Pi session resumes the same Claude Code conversation. When Pi compacts or rewrites the history during a Pi tool call, the bridge restarts from Pi's new history with the completed tool results. A query that used one of Claude Code's own connectors finishes first, and the next turn uses Pi's new history.
 

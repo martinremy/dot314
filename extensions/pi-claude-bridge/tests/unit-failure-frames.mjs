@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 
 import { __testGetBridgeIntegrityState, __testSetBridgeIntegrityState, __testSetSdkQueryFactory, streamClaudeAgentSdk } from "../src/index.ts";
-import { setExtensionApi } from "../src/bridge-state.ts";
+import { setExtensionApi, setSharedSession } from "../src/bridge-state.ts";
 import { notePromptSource, takeAgentNotice } from "../src/agent-notice.ts";
 import { resetStack } from "../src/query-state.ts";
 import { runInRequestLane } from "../src/request-lane.ts";
@@ -195,6 +195,51 @@ describe("a truncated tool call left out of the error message is owed no result"
 });
 
 describe("the user is told what follows a stream idle timeout", () => {
+	it("counts a non-streaming model reply as an API response", { timeout: 10_000 }, async () => {
+		process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "200ms";
+		__testSetSdkQueryFactory(() => {
+			let wake;
+			return {
+				async *[Symbol.asyncIterator]() {
+					yield { type: "system", subtype: "init", session_id: "fallback-response" };
+					yield { type: "assistant", message: { id: "fallback-reply", model: model.id, role: "assistant", content: [{ type: "text", text: "Model answered." }] } };
+					await new Promise(resolve => { wake = resolve; });
+				},
+				close() { wake?.(); },
+				async interrupt() { wake?.(); },
+			};
+		});
+		const lane = "frames-fallback-response";
+		runInRequestLane(lane, () => setSharedSession({ sessionId: "earlier-session", cursor: 3, cwd: root, needsRebuild: true, rebuildReason: "idle-timeout", forceRotate: true }));
+		const conversation = { messages: [...context().messages, { role: "assistant", content: [{ type: "text", text: "done" }], provider: model.provider, api: model.api, stopReason: "stop", timestamp: 1 }, { role: "user", content: "next", timestamp: 2 }] };
+		const ended = (await consumeLikePi(streamClaudeAgentSdk(model, conversation, { sessionId: lane, cwd: root }))).events.at(-1).error;
+		assert.equal(isRetryableAssistantError(ended), true, "a real model reply breaks the consecutive-unanswered sequence");
+	});
+
+	it("stops retrying a rebuilt conversation after a second unanswered attempt", { timeout: 10_000 }, async () => {
+		process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "200ms";
+		__testSetSdkQueryFactory(() => {
+			let wake;
+			return {
+				async *[Symbol.asyncIterator]() {
+					yield { type: "system", subtype: "init", session_id: "repeat-stall" };
+					await new Promise(resolve => { wake = resolve; });
+				},
+				close() { wake?.(); },
+				async interrupt() { wake?.(); },
+			};
+		});
+		const lane = "frames-repeat-stall";
+		runInRequestLane(lane, () => setSharedSession({ sessionId: "earlier-session", cursor: 3, cwd: root }));
+		const conversation = { messages: [...context().messages, { role: "assistant", content: [{ type: "text", text: "done" }], provider: model.provider, api: model.api, stopReason: "stop", timestamp: 1 }, { role: "user", content: "next", timestamp: 2 }] };
+		const first = (await consumeLikePi(streamClaudeAgentSdk(model, conversation, { sessionId: lane, cwd: root }))).events.at(-1).error;
+		assert.equal(isRetryableAssistantError(first), true);
+		const second = (await consumeLikePi(streamClaudeAgentSdk(model, conversation, { sessionId: lane, cwd: root }))).events.at(-1).error;
+		assert.equal(second.stopReason, "error");
+		assert.equal(isRetryableAssistantError(second), false);
+		assert.match(second.errorMessage, /\/compact/);
+	});
+
 	it("an error: retryable by Pi's auto-retry, which announces its own retries", { timeout: 10_000 }, () => withAgentNotices(async () => {
 		process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "200ms";
 		installFakeClaudeCode([], { stall: true });

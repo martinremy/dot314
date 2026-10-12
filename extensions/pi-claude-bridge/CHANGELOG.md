@@ -6,6 +6,9 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ### Fixed
 
+- Adapted nicobailon's transcript improvements: forked Pi sessions can copy a verified parent prefix into their own Claude transcript; re-encoded images can match saved originals; and rebuilds retain Claude Code's self-answered calls. Image evidence is restricted to the session's own directory, copied before a source session is removed, and never accepted merely because its file is missing.
+- A rebuilt conversation that produces no model response for a second consecutive attempt stops with a nonretryable error instead of repeatedly rebuilding and retrying. Transcript retirement remains a separate change.
+
 - System instructions changed during a Pi tool call take effect before Claude's next reply. The bridge restarts with the current leading prompt and imports completed tool results. It stops with an error when child-executed calls are absent from Pi's history and cannot be replayed safely. This replaces delivery through SDK hooks, which live tests showed could be treated as user or tool content. Prompt changes can invalidate the cache.
 
 ## 2026-10-11

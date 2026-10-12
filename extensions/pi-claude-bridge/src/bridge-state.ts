@@ -11,7 +11,7 @@ import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairin
  *  timing lines. */
 export const REBUILD_MARKS = [
 	"abort", "idle-timeout", "usage-credits", "history-replaced", "history-rewritten", "user-unresolved",
-	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified", "host-resumed",
+	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified", "host-resumed", "inherited",
 ] as const;
 export type RebuildMark = typeof REBUILD_MARKS[number];
 
@@ -70,6 +70,8 @@ export interface SessionState {
 	// this — there's no concurrent CC writer during those events, so
 	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
+	/** A parent's transcript: copy a verified prefix, never resume, rewrite or persist it as this session's. */
+	inherited?: true;
 }
 
 // Claude session state is scoped to Pi's provider `sessionId`. Parent and child

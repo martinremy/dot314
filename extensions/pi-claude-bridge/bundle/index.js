@@ -2129,6 +2129,7 @@ var QueryContext = class {
   // replayed on another account (duplicate side effects). Query-scoped, not per-turn:
   // resetTurnState must not clear it.
   committedOutput = false;
+  apiResponded = false;
   /** True when this query holds NO claim on the module-level shared session
    *  record: a foreign-conversation one-shot, or a query quarantined after
    *  an abort or stream-idle timeout.
@@ -3059,7 +3060,8 @@ var REBUILD_MARKS = [
   "steering-failed",
   "tool-results-outstanding",
   "orphan-unverified",
-  "host-resumed"
+  "host-resumed",
+  "inherited"
 ];
 var SHARED_SESSION_LANES_SYMBOL = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.shared-session-lanes.v1");
 function sharedSessionLaneStore() {
@@ -3374,6 +3376,7 @@ function formatDurationShort(ms2) {
 function buildStreamIdleTimeoutErrorMessage(timeoutMs) {
   return `Claude Code stream idle timeout after ${formatDurationShort(timeoutMs)} with no output from Claude Code; treating stalled stream as retryable 529 overloaded/rate limit condition. Retry after ${formatDurationShort(STREAM_IDLE_BACKOFF_HINT_MS)}.`;
 }
+var REPEATED_STALL_ERROR_MESSAGE = "Claude Code gave no model response on two consecutive attempts. Automatic retries have stopped. Try /compact to reduce the conversation before sending the message again.";
 var BRIDGE_WAIT_RECHECK_MS = 1e3;
 function createStreamIdleWatchdog({
   clearTimer = (timer) => clearTimeout(timer),
@@ -48003,12 +48006,93 @@ function readSession(jsonlPath, projectPath) {
 
 // src/session-persistence.ts
 import { createHash as createHash5 } from "crypto";
-import { closeSync as closeSync4, mkdirSync as mkdirSync5, openSync as openSync4, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync5, writeFileSync as writeFileSync3 } from "fs";
-import { dirname as dirname7, resolve as pathResolve } from "path";
+import { closeSync as closeSync4, mkdirSync as mkdirSync6, openSync as openSync4, realpathSync as realpathSync6, rmSync as rmSync3, statSync as statSync5, writeFileSync as writeFileSync4 } from "fs";
+import { dirname as dirname8, resolve as pathResolve } from "path";
 
 // src/native-fork.ts
-import { readFileSync as readFileSync7 } from "fs";
+import { readFileSync as readFileSync8 } from "fs";
+import { isDeepStrictEqual as isDeepStrictEqual2 } from "node:util";
+
+// src/native-images.ts
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, realpathSync as realpathSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { basename, dirname as dirname7, extname, join as join10 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+var SOURCE_PREFIX = "[Image: source: ";
+var imageSchema = external_exports.object({ type: external_exports.literal("image"), source: external_exports.object({ type: external_exports.literal("base64"), data: external_exports.string(), media_type: external_exports.string() }) });
+var textSchema = external_exports.object({ type: external_exports.literal("text"), text: external_exports.string() });
+var nativeResultContentSchema = external_exports.union([external_exports.string(), external_exports.array(external_exports.union([textSchema, imageSchema]))]).transform((content) => {
+  if (!Array.isArray(content)) return [{ type: "text", text: content }];
+  return content.map((block) => block.type === "text" ? { type: "text", text: block.text } : { type: "image", source: { type: "base64", data: block.source.data, media_type: block.source.media_type } });
+});
+var IMAGE_MIME_TYPES = /* @__PURE__ */ new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".gif", "image/gif"], [".webp", "image/webp"]]);
+function savedFilesDir(transcript) {
+  return join10(transcript.replace(/\.jsonl$/, ""), "tool-results");
+}
+function imageFilename(note) {
+  if (note.type !== "text" || !note.text.startsWith(SOURCE_PREFIX) || !note.text.endsWith("]")) return void 0;
+  return basename(note.text.slice(SOURCE_PREFIX.length, -1).split(", original ")[0]);
+}
+function savedImage(filename, transcript) {
+  try {
+    const project = realpathSync5(dirname7(transcript));
+    const session = realpathSync5(dirname7(savedFilesDir(transcript)));
+    const directory = realpathSync5(savedFilesDir(transcript));
+    if (dirname7(session) !== project || dirname7(directory) !== session) return void 0;
+    const path = realpathSync5(join10(directory, filename));
+    if (dirname7(path) !== directory) return void 0;
+    return readFileSync7(path);
+  } catch {
+    debug("native image: original evidence is unavailable", JSON.stringify({ filename }));
+    return void 0;
+  }
+}
+function verifiedStoredImages(blocks, wanted, transcript, metadata) {
+  const restored = [];
+  const originals = [];
+  let position = 0;
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index];
+    const expectedBlock = wanted[position];
+    const suppliedBlock = isDeepStrictEqual(block, expectedBlock);
+    if (metadata === "sdk" && index > 0 && blocks[index - 1].type === "image" && imageFilename(block) !== void 0 && !suppliedBlock) {
+      continue;
+    }
+    position++;
+    const note = blocks[index + 1];
+    const filename = Boolean(note) ? imageFilename(note) : void 0;
+    if (metadata === "sdk" && block.type === "image" && Boolean(expectedBlock) && expectedBlock.type === "image" && (block.source.data !== expectedBlock.source.data || block.source.media_type !== expectedBlock.source.media_type) && filename !== void 0 && IMAGE_MIME_TYPES.get(extname(filename)) === expectedBlock.source.media_type) {
+      const saved = savedImage(filename, transcript);
+      if (Boolean(saved) && saved.toString("base64") === expectedBlock.source.data) {
+        restored.push(expectedBlock);
+        originals.push({ filename, data: expectedBlock.source.data });
+        continue;
+      }
+    }
+    restored.push(block);
+  }
+  return { content: restored, originals };
+}
+function carrySavedImages(images, from, to2) {
+  const copied = /* @__PURE__ */ new Map();
+  for (const { filename, data } of images) {
+    const previous = copied.get(filename);
+    if (previous !== void 0) {
+      if (previous !== data) throw new Error(`native image: conflicting originals for ${filename}`);
+      continue;
+    }
+    const saved = savedImage(filename, from);
+    if (!Boolean(saved) || saved.toString("base64") !== data) throw new Error(`native image: original changed after verification: ${filename}`);
+    const target = join10(savedFilesDir(to2), filename);
+    mkdirSync5(dirname7(target), { recursive: true });
+    writeFileSync3(target, saved, { flag: "wx" });
+    copied.set(filename, data);
+  }
+}
+
+// src/native-fork.ts
+var toolCallSchema = external_exports.object({ type: external_exports.literal("tool_use"), id: external_exports.string(), name: external_exports.string() });
+var toolResultSchema = external_exports.object({ type: external_exports.literal("tool_result"), tool_use_id: external_exports.string(), content: external_exports.unknown(), is_error: external_exports.boolean().optional() });
+var toolResultsSchema = external_exports.array(toolResultSchema);
 var CHAIN_TYPES = /* @__PURE__ */ new Set(["user", "assistant", "attachment", "system", "progress"]);
 var isObject3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var recordMessage = (record2) => record2.message;
@@ -48046,7 +48130,7 @@ function sameContent(native, candidates) {
   if (!normalized) return false;
   return candidates.some((candidate) => {
     const expected = normalizeBlocks(candidate);
-    return expected !== void 0 && isDeepStrictEqual(normalized, expected);
+    return expected !== void 0 && isDeepStrictEqual2(normalized, expected);
   });
 }
 function promptForm(messages) {
@@ -48060,27 +48144,22 @@ function deliveredResultForm(message, toolName) {
   if (toolName !== void 0 && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
   return blocks.map((block) => block.type === "text" ? { type: "text", text: block.text } : { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
 }
-function imagesByPlace(content) {
-  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
-  if (!Array.isArray(blocks)) return content;
-  const placed = [];
-  for (const block of blocks) {
-    if (!isObject3(block)) return content;
-    const previous = placed.at(-1);
-    if (block.type === "image") placed.push(block);
-    else if (isObject3(previous) && previous.type === "image" && block.type === "text" && typeof block.text === "string" && block.text.startsWith("[Image: source: ") && block.text.endsWith("]")) continue;
-    else placed.push(block);
-  }
-  return placed;
-}
 function promptMatches(record2, message) {
   return sameContent(recordMessage(record2).content, [promptForm([message]), userMessageToAnthropic(message).content]);
 }
-function toolResultMatches(block, message, toolName) {
-  if (block.is_error === true !== (message.isError === true)) return false;
+function matchToolResult(block, message, toolName, transcriptPath, metadata) {
+  if (block.is_error === true !== (message.isError === true)) return void 0;
+  const native = nativeResultContentSchema.safeParse(block.content);
+  if (!native.success) return void 0;
   const content = message.content;
   const expected = [deliveredResultForm(message, toolName), toolResultContentToAnthropic(content) || ""];
-  return sameContent(imagesByPlace(block.content), expected.map(imagesByPlace));
+  for (const form of expected) {
+    const own = nativeResultContentSchema.safeParse(form);
+    if (!own.success) continue;
+    const stored = verifiedStoredImages(native.data, own.data, transcriptPath, metadata);
+    if (sameContent(stored.content, [own.data])) return stored.originals;
+  }
+  return void 0;
 }
 function streamedPiBlock(block, customToolNameToPi) {
   if (!isObject3(block)) return void 0;
@@ -48115,11 +48194,12 @@ function streamedMatches(blocks, message, customToolNameToPi) {
   const assistant = message;
   if (assistant.provider !== PROVIDER_ID && assistant.api !== "anthropic") return false;
   const content = assistant.content;
-  if (!Array.isArray(content) || content.length !== blocks.length) return false;
-  return blocks.every((block, n) => {
+  const mirrored = blocks.flatMap((block) => {
     const streamed = streamedPiBlock(block, customToolNameToPi);
-    return streamed !== void 0 && (isDeepStrictEqual(streamed, storedPiBlock(content[n])) || sameSignedThinking(block, content[n]));
+    return streamed === void 0 ? [] : [{ block, streamed }];
   });
+  if (!Array.isArray(content) || content.length !== mirrored.length) return false;
+  return mirrored.every(({ block, streamed }, n) => isDeepStrictEqual2(streamed, storedPiBlock(content[n])) || sameSignedThinking(block, content[n]));
 }
 function importedMatches(blocks, message, customToolNameToSdk) {
   const expected = convertPiMessages([message], customToolNameToSdk).anthropicMessages[0]?.content;
@@ -48136,7 +48216,7 @@ function importedBlockMatches(native, expected) {
     case "redacted_thinking":
       return native.data === expected.data;
     case "tool_use":
-      return native.id === expected.id && native.name === expected.name && isDeepStrictEqual(native.input, expected.input);
+      return native.id === expected.id && native.name === expected.name && isDeepStrictEqual2(native.input, expected.input);
     default:
       return false;
   }
@@ -48144,12 +48224,12 @@ function importedBlockMatches(native, expected) {
 function readTranscript(path) {
   let text;
   try {
-    text = readFileSync7(path, "utf8");
+    text = readFileSync8(path, "utf8");
   } catch (error51) {
     return { reason: error51.code === "ENOENT" ? "old-session-missing" : "old-session-unreadable" };
   }
   const records = [];
-  for (const line of text.split("\n")) {
+  for (const line of text.slice(0, text.lastIndexOf("\n") + 1).split("\n")) {
     if (!line.trim()) continue;
     let value;
     try {
@@ -48191,7 +48271,8 @@ function mainChain(records) {
   return { chain: chain.reverse() };
 }
 function planNativePrefix(priors, oldSessionId, cwd, claudeDir, customToolNameToSdk, customToolNameToPi) {
-  const read = readTranscript(getSessionPath(oldSessionId, cwd, claudeDir));
+  const transcriptPath = getSessionPath(oldSessionId, cwd, claudeDir);
+  const read = readTranscript(transcriptPath);
   if ("reason" in read) return { reason: read.reason };
   const walked = mainChain(read.records);
   if ("reason" in walked) return { reason: walked.reason };
@@ -48212,7 +48293,7 @@ function planNativePrefix(priors, oldSessionId, cwd, claudeDir, customToolNameTo
     }
     return void 0;
   };
-  const trailing = (from, last, next, verified = []) => {
+  const trailing = (from, last, next, verified = [], originalImages = []) => {
     let end2 = from;
     let cut2 = last;
     const steers = [];
@@ -48230,7 +48311,7 @@ function planNativePrefix(priors, oldSessionId, cwd, claudeDir, customToolNameTo
       cut2 = end2;
       end2++;
     }
-    return { next, last: cut2, end: end2, stop: end2 < chain.length && isQueuedCommand(chain[end2]), stitched: verified, steers };
+    return { next, last: cut2, end: end2, stop: end2 < chain.length && isQueuedCommand(chain[end2]), stitched: verified, steers, originalImages };
   };
   const matchPrompt = (at2, index2) => {
     const record2 = chain[at2];
@@ -48251,39 +48332,81 @@ function planNativePrefix(priors, oldSessionId, cwd, claudeDir, customToolNameTo
     if (typeof messageId !== "string") return void 0;
     let position2 = at2;
     const blocks = [];
-    while (position2 < chain.length && chain[position2].type === "assistant" && recordMessage(chain[position2]).id === messageId) {
-      const content = recordMessage(chain[position2]).content;
-      if (!Array.isArray(content)) return void 0;
-      blocks.push(...content);
+    const own = /* @__PURE__ */ new Set();
+    const answeredOwn = /* @__PURE__ */ new Set();
+    const allCalls = [];
+    const ownResults = (record2) => {
+      const content = Boolean(record2) && record2.type === "user" ? recordMessage(record2).content : void 0;
+      const parsed = toolResultsSchema.safeParse(content);
+      if (!parsed.success || parsed.data.length === 0) return void 0;
+      const ids = parsed.data.map((block) => block.tool_use_id);
+      return ids.every((id) => own.has(id) && !answeredOwn.has(id)) ? ids : void 0;
+    };
+    const sameMessage = (record2) => Boolean(record2) && record2.type === "assistant" && recordMessage(record2).id === messageId;
+    while (position2 < chain.length) {
+      if (sameMessage(chain[position2])) {
+        const content = recordMessage(chain[position2]).content;
+        if (!Array.isArray(content)) return void 0;
+        blocks.push(...content);
+        for (const block of content) {
+          const call = toolCallSchema.safeParse(block);
+          if (call.success) {
+            allCalls.push(call.data);
+            if (streamedPiBlock(block, customToolNameToPi) === void 0) own.add(call.data.id);
+          }
+        }
+        position2++;
+        continue;
+      }
+      const answered = sameMessage(chain[position2 + 1]) ? ownResults(chain[position2]) : void 0;
+      if (!Boolean(answered)) break;
+      for (const id of answered) answeredOwn.add(id);
       position2++;
     }
-    if (!streamedMatches(blocks, priors[index2], customToolNameToPi) && !importedMatches(blocks, priors[index2], customToolNameToSdk)) return void 0;
+    if (!streamedMatches(blocks, priors[index2], customToolNameToPi)) {
+      if (!importedMatches(blocks, priors[index2], customToolNameToSdk) || answeredOwn.size > 0) return void 0;
+      own.clear();
+    }
     let last = position2 - 1;
     let next = index2 + 1;
     const verified = [];
-    const calls = blocks.filter((block) => isObject3(block) && block.type === "tool_use");
+    const originalImages = [];
+    const calls = allCalls.filter((call) => !own.has(call.id));
     const callIds = calls.map((call) => call.id);
     const callNames = new Map(calls.map((call) => [call.id, call.name]));
+    if (callIds.length === 0 && priors[index2 + 1]?.role === "toolResult") return void 0;
     if (callIds.length > 0) {
       const ids = /* @__PURE__ */ new Map();
       const results = /* @__PURE__ */ new Map();
-      while (next < priors.length && priors[next].role === "toolResult") {
-        const raw = priors[next].toolCallId;
+      while (next < priors.length) {
+        const result = priors[next];
+        if (result.role !== "toolResult") break;
+        const raw = result.toolCallId;
         const clean = sanitizeToolId(raw, ids);
         if (results.has(raw) || results.has(clean)) return void 0;
-        results.set(raw, priors[next]);
-        if (clean !== raw) results.set(clean, priors[next]);
+        results.set(raw, result);
+        if (clean !== raw) results.set(clean, result);
         next++;
       }
       if (next - (index2 + 1) !== callIds.length || new Set(callIds.map((id) => results.get(id))).size !== callIds.length || callIds.some((id) => !results.has(id))) return void 0;
       const answered = /* @__PURE__ */ new Set();
       const answers = (record2) => {
         const content = record2.type === "user" ? recordMessage(record2).content : void 0;
-        if (!Array.isArray(content) || content.length === 0 || !content.every((block) => isObject3(block) && block.type === "tool_result")) return false;
-        for (const block of content) {
+        const parsed = toolResultsSchema.safeParse(content);
+        if (!parsed.success || parsed.data.length === 0) return false;
+        const metadata = Object.hasOwn(record2, "toolUseResult") ? "sdk" : "literal";
+        for (const block of parsed.data) {
           const id = block.tool_use_id;
-          const result = typeof id === "string" ? results.get(id) : void 0;
-          if (!result || answered.has(id) || !toolResultMatches(block, result, callNames.get(id))) return false;
+          if (own.has(id)) {
+            if (answeredOwn.has(id)) return false;
+            answeredOwn.add(id);
+            continue;
+          }
+          const result = results.get(id);
+          if (!Boolean(result) || answered.has(id)) return false;
+          const originals = matchToolResult(block, result, callNames.get(id), transcriptPath, metadata);
+          if (!Boolean(originals)) return false;
+          originalImages.push(...originals);
           answered.add(id);
         }
         return true;
@@ -48307,7 +48430,20 @@ ${record2.uuid}`);
         position2++;
       }
     }
-    return trailing(position2, last, next, verified);
+    while (answeredOwn.size < own.size) {
+      const record2 = chain[position2];
+      if (!Boolean(record2)) return void 0;
+      if (isTrailingCarry(record2)) {
+        position2++;
+        continue;
+      }
+      const ids = ownResults(record2);
+      if (!Boolean(ids)) return void 0;
+      for (const id of ids) answeredOwn.add(id);
+      last = position2;
+      position2++;
+    }
+    return trailing(position2, last, next, verified, originalImages);
   };
   let position = 0;
   let index = 0;
@@ -48328,7 +48464,7 @@ ${record2.uuid}`);
     }
     if (!group) break;
     index = group.next;
-    ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched, steers: group.steers });
+    ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched, steers: group.steers, originalImages: group.originalImages });
     position = group.end;
     if (group.stop) break;
   }
@@ -48351,6 +48487,8 @@ ${record2.uuid}`);
   return {
     prefix: {
       oldSessionId,
+      transcriptPath,
+      originalImages: ends.slice(0, ends.indexOf(end) + 1).flatMap((group) => group.originalImages),
       records: read.records,
       cutUuid: chain[cut].uuid,
       piCount,
@@ -48622,6 +48760,15 @@ function verifyWrittenSession(jsonlPath, expectedSessionId, expectedRecordCount)
 
 // src/session-persistence.ts
 var BRIDGE_SESSION_CUSTOM_TYPE = "claude-bridge-session";
+var persistedMetadataSchema = external_exports.object({
+  conversationFingerprint: external_exports.string().optional(),
+  historyDigest: external_exports.string().optional(),
+  trailingAssistantDigest: external_exports.string().optional(),
+  needsRebuild: external_exports.boolean().optional(),
+  rebuildReason: external_exports.enum(REBUILD_MARKS).optional(),
+  forceRotate: external_exports.boolean().optional(),
+  accountProfileId: external_exports.string().optional()
+});
 function normalizedMessageText(message) {
   const content = message.content;
   const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((block) => block.type === "text" ? block.text ?? "" : "").join("\n") : "";
@@ -48708,7 +48855,7 @@ function claudeSessionExists(sessionId, cwd, claudeDir) {
 function canonicalize(p) {
   if (!p) return void 0;
   try {
-    return realpathSync5.native(p);
+    return realpathSync6.native(p);
   } catch {
     return pathResolve(p);
   }
@@ -48723,13 +48870,14 @@ function shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, curren
   }
   return void 0;
 }
-function restoreSharedSessionFromPi(ctx2) {
+function restoreSharedSessionFromPi(ctx2, source = "own") {
   const persisted = latestPersistedBridgeSession(ctx2.sessionManager);
   if (!persisted) return;
   const currentPiSessionId = typeof ctx2.sessionManager?.getSessionId === "function" ? ctx2.sessionManager.getSessionId() : void 0;
   const currentCwd = typeof ctx2.sessionManager?.getCwd === "function" ? ctx2.sessionManager.getCwd() : ctx2.cwd;
   const rejection = shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, currentCwd);
-  if (rejection) {
+  const inherited = source === "parent" && Boolean(currentPiSessionId) && Boolean(persisted.piSessionId) && persisted.piSessionId !== currentPiSessionId;
+  if (rejection && !inherited) {
     debug(`restoreSharedSession: ${rejection} \u2014 forcing rebuild`);
     return;
   }
@@ -48741,30 +48889,35 @@ function restoreSharedSessionFromPi(ctx2) {
     debug(`restoreSharedSession: fingerprint mismatch for ${persisted.sessionId.slice(0, 8)}`);
     return;
   }
-  const accountProfileId = typeof persisted.accountProfileId === "string" ? persisted.accountProfileId : void 0;
+  const metadata = persistedMetadataSchema.safeParse(persisted);
+  if (!metadata.success) {
+    debug("restoreSharedSession: invalid session metadata; forcing rebuild");
+    return;
+  }
+  publishRestoredSession(persisted, cursor, metadata.data, inherited ? "parent" : "own");
+}
+function publishRestoredSession(persisted, cursor, metadata, ownership) {
+  const accountProfileId = metadata.accountProfileId;
   const claudeConfigDir = accountProfileId ? claudeDirForProfile(resolveClaudeAccountRouter()?.resolveProfile?.(accountProfileId) ?? {}) : void 0;
+  if (ownership === "parent") {
+    const parent = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd, needsRebuild: true, rebuildReason: "inherited", inherited: true };
+    if (accountProfileId) {
+      parent.accountProfileId = accountProfileId;
+      parent.claudeConfigDir = claudeConfigDir;
+    }
+    setSharedSession(parent);
+    debug("restoreSharedSession: copying a parent transcript on the next rebuild", persisted.sessionId.slice(0, 8));
+    return;
+  }
   if (!claudeSessionExists(persisted.sessionId, persisted.cwd, claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR)) {
     debug(`restoreSharedSession: Claude session missing for ${persisted.sessionId.slice(0, 8)}`);
     return;
   }
   setSharedSession({
+    ...metadata,
     sessionId: persisted.sessionId,
     cursor,
     cwd: persisted.cwd,
-    // Absent on pre-3.1.1 markers: restore as identity-unknown (the foreign
-    // guard fails open) rather than rejecting the entry.
-    ...typeof persisted.conversationFingerprint === "string" ? { conversationFingerprint: persisted.conversationFingerprint } : {},
-    // The digest of the history Claude holds travels with the marker; absent
-    // on older markers, where the next REUSE adopts one (history-digest.ts).
-    ...typeof persisted.historyDigest === "string" ? { historyDigest: persisted.historyDigest } : {},
-    ...typeof persisted.trailingAssistantDigest === "string" ? { trailingAssistantDigest: persisted.trailingAssistantDigest } : {},
-    // A rebuild the record still owed must survive the restart: without it
-    // the next turn would resume a transcript known to differ from Pi's.
-    ...persisted.needsRebuild === true ? {
-      needsRebuild: true,
-      ...REBUILD_MARKS.includes(persisted.rebuildReason) ? { rebuildReason: persisted.rebuildReason } : {}
-    } : {},
-    ...persisted.forceRotate === true ? { forceRotate: true } : {},
     ...accountProfileId ? { accountProfileId, claudeConfigDir } : {}
   });
   debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}, account=${accountProfileId ?? "default"}`);
@@ -48790,6 +48943,7 @@ function schedulePersistSharedSession(ctxLike) {
   const sharedSession = getSharedSession();
   const extensionApi2 = getExtensionApi();
   if (!extensionApi2 || !sharedSession || !ctxLike?.sessionManager) return;
+  if (Boolean(sharedSession.inherited)) return;
   const sessionManager = ctxLike.sessionManager;
   const { claudeConfigDir: _omitted, ...snapshot } = sharedSession;
   const timers = scheduledPersistenceTimers();
@@ -48910,7 +49064,7 @@ For details, ${diagGuidance()}.`,
 }
 function safeRealpath(p) {
   try {
-    return realpathSync5(p);
+    return realpathSync6(p);
   } catch (e) {
     return `<failed: ${e.message}>`;
   }
@@ -48988,10 +49142,11 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
   const replacedSessionId = sharedSession?.sessionId;
   const previousSessionId = sameAccount ? sharedSession?.sessionId : void 0;
   const previousCursor = sameAccount ? sharedSession?.cursor ?? 0 : 0;
-  const preserveId = previousSessionId !== void 0 && !sharedSession?.forceRotate;
-  const cause = replacedSessionId === void 0 ? "first-turn-history" : !sameAccount ? "account-rotation" : !preserveId ? "post-abort-rotation" : sharedSession?.needsRebuild ? "needs-rebuild" : digestCause ?? "missed-messages";
+  const inherited = Boolean(sharedSession) && Boolean(sharedSession.inherited);
+  const preserveId = previousSessionId !== void 0 && !sharedSession.forceRotate && !inherited;
+  const cause = replacedSessionId === void 0 ? "first-turn-history" : !sameAccount ? "account-rotation" : inherited ? "inherited" : !preserveId ? "post-abort-rotation" : sharedSession?.needsRebuild ? "needs-rebuild" : digestCause ?? "missed-messages";
   if (previousSessionId !== void 0 && options.fork !== false) {
-    const plan = planNativePrefix(priorMessages, previousSessionId, cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi);
+    const plan = planNativePrefix(priorMessages, previousSessionId, inherited ? sharedSession.cwd : cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi);
     if ("prefix" in plan) {
       return rebuildFromNativePrefix(plan.prefix, {
         messages,
@@ -49067,7 +49222,7 @@ function writeNewSessionFile(path, data) {
   const fd2 = openSync4(path, "wx");
   try {
     try {
-      writeFileSync3(fd2, data, "utf8");
+      writeFileSync4(fd2, data, "utf8");
     } finally {
       closeSync4(fd2);
     }
@@ -49116,7 +49271,7 @@ async function rebuildFromNativePrefix(prefix, c) {
   const tailRecords = session.records.map((record2, n) => n === 0 ? { ...record2, parentUuid: forked.leafUuid } : record2);
   const lines = [...forked.entries, ...tailRecords].map((record2) => `${serializeRecord(record2)}
 `).join("");
-  mkdirSync5(dirname7(session.jsonlPath), { recursive: true });
+  mkdirSync6(dirname8(session.jsonlPath), { recursive: true });
   writeNewSessionFile(session.jsonlPath, lines);
   const recordCount = forked.entries.length + tailRecords.length;
   const warnings = verifyWrittenSession(session.jsonlPath, forked.sessionId, recordCount);
@@ -49126,6 +49281,7 @@ async function rebuildFromNativePrefix(prefix, c) {
     return replan(`the forked session ${forked.sessionId.slice(0, 8)} failed verification (${warnings.length} warning(s))`);
   }
   stepEnd("rebuildWrite", writeStarted);
+  carrySavedImages(prefix.originalImages, prefix.transcriptPath, session.jsonlPath);
   if (c.preserveId) deleteSession(prefix.oldSessionId, c.cwd, c.claudeDir);
   const accountProfileId = c.account?.accountProfileId;
   const scopeConfigDir = c.account?.claudeConfigDir;
@@ -49467,6 +49623,7 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
     const streamLive = Boolean(queryCtx.currentPiStream);
     switch (message.type) {
       case "stream_event":
+        queryCtx.apiResponded = true;
         queryCtx.timing?.phase("firstStreamEvent");
         if (!streamLive) break;
         processStreamEvent(message, customToolNameToPi, model, queryCtx);
@@ -49479,6 +49636,7 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
           if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: notice || String(sdkError) });
           break;
         }
+        if (message.message.model !== "<synthetic>") queryCtx.apiResponded = true;
         if (!streamLive && !queryCtx.turnSawToolCall) break;
         processAssistantMessage(message, model, customToolNameToPi, queryCtx);
         break;
@@ -50335,6 +50493,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
   ctx().instructionsChanged = null;
   ctx().userInputNeedsRebuild = false;
   ctx().committedOutput = false;
+  ctx().apiResponded = false;
   ctx().piHistoryReplaced = false;
   ctx().historyReplacedAfterQuery = false;
   ctx().reportedHistoryRestartDecline = false;
@@ -50606,6 +50765,8 @@ function startFreshQuery(fresh, syncResult) {
   };
   const persistSession = (next) => {
     if (foreignContext || abortCtx.detachedFromSharedSession) return;
+    const live = getSharedSession();
+    if (Boolean(next) && Boolean(live) && Boolean(live.inherited) && next.sessionId === live.sessionId) return;
     const restartPending = Boolean(abortCtx.restartRequest);
     let replaced = next;
     if (Boolean(next) && (abortCtx.piHistoryReplaced || restartPending || abortCtx.userInputNeedsRebuild || abortCtx.priorHistoryRewritten)) {
@@ -50690,6 +50851,13 @@ function startFreshQuery(fresh, syncResult) {
       quarantine("idle-timeout");
       const errorMessage = buildStreamIdleTimeoutErrorMessage(timeoutMs);
       debug("provider: stream idle timeout", `model=${queryModel.id}`, `timeout=${timeoutMs}`, `idle=${idleMs}`);
+      if (syncResult.sync.path === "rebuild" && syncResult.sync.mark === "idle-timeout" && !abortCtx.apiResponded) {
+        abortCtx.handledTerminalError = true;
+        debug("provider: consecutive unanswered attempts; stopping automatic retries");
+        endStreamForFailure(abortCtx, { errorMessage: REPEATED_STALL_ERROR_MESSAGE, fields: { streamIdleTimeoutMs: timeoutMs } });
+        requestAbort();
+        return;
+      }
       const idleFailure = { kind: "network", message: errorMessage };
       if (abortCtx.activeQuery === sdkQuery2 && requestRotation(idleFailure)) {
         requestAbort();
@@ -50982,8 +51150,8 @@ function index_default(pi2) {
     }
     if (event.reason === "reload" && takeReloadWithLiveWriter(ctx2.sessionManager)) {
       debug("restoreSharedSession: a Claude Code child may still write the session at the reload \u2014 forcing rebuild");
-    } else if (event.reason === "startup" || event.reason === "resume" || event.reason === "reload") {
-      restoreSharedSessionFromPi(ctx2);
+    } else if (event.reason === "startup" || event.reason === "resume" || event.reason === "reload" || event.reason === "fork") {
+      restoreSharedSessionFromPi(ctx2, event.reason === "fork" ? "parent" : "own");
     }
     applyProviderRegistration(`session_start:${event.reason}`);
   }));

@@ -25,11 +25,20 @@ import { isDeepStrictEqual } from "node:util";
 import { isChildExecutedTool } from "./connectors.ts";
 import { PROVIDER_ID, convertPiMessages, isSkippedAssistant, sanitizeToolId, toolResultContentToAnthropic, unreplayableTrailingTurns, userMessageToAnthropic } from "./convert.ts";
 import { debug } from "./debug.ts";
+import { nativeResultContentSchema, verifiedStoredImages, type SavedOriginalImage } from "./native-images.ts";
+import { z } from "zod";
 import { toolResultToMcpContent } from "./extract-tool-results.ts";
 import { isPiDispatchable, mapToolArgs, mapToolName } from "./tool-mapping.ts";
 import { extractUserPrompt, extractUserPromptBlocks } from "./user-prompt.ts";
 
 type PiMessage = Context["messages"][number];
+type PiToolResult = Extract<PiMessage, { role: "toolResult" }>;
+const toolCallSchema = z.object({ type: z.literal("tool_use"), id: z.string(), name: z.string() });
+const toolResultSchema = z.object({ type: z.literal("tool_result"), tool_use_id: z.string(), content: z.unknown(), is_error: z.boolean().optional() });
+const toolResultsSchema = z.array(toolResultSchema);
+type NativeToolCall = z.infer<typeof toolCallSchema>;
+type NativeToolResult = z.infer<typeof toolResultSchema>;
+type NativeResultContent = z.infer<typeof nativeResultContentSchema>;
 
 /** A transcript line, as parsed. */
 type TranscriptRecord = SessionStoreEntry & {
@@ -50,6 +59,8 @@ interface RecordMessage {
 /** The verified prefix of the old transcript. */
 export interface NativePrefix {
 	oldSessionId: string;
+	transcriptPath: string;
+	originalImages: SavedOriginalImage[];
 	/** Every record of the old transcript, as read once by planNativePrefix. */
 	records: TranscriptRecord[];
 	/** Uuid of the last chain record the prefix keeps. */
@@ -145,30 +156,15 @@ function promptForm(messages: PiMessage[]): unknown {
  *  with no output)", naming the tool as its call does. It stores a failed
  *  result as one string: the text blocks joined by newlines and trimmed, or
  *  "Command failed with no output" when that is empty (claude 2.1.296). */
-function deliveredResultForm(message: PiMessage, toolName: string | undefined): unknown {
-	const blocks = toolResultToMcpContent(message.content as Parameters<typeof toolResultToMcpContent>[0]);
-	const failed = (message as { isError?: boolean }).isError === true;
+function deliveredResultForm(message: PiToolResult, toolName: string | undefined): string | NativeResultContent {
+	const blocks = toolResultToMcpContent(message.content);
+	const failed = message.isError === true;
 	if (failed) return blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim() || "Command failed with no output";
 	if (toolName !== undefined && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
 	return blocks.map((block) =>
 		block.type === "text"
 			? { type: "text", text: block.text }
 			: { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
-}
-
-/** Removes Claude Code's added image-file notes while retaining image bytes and media type. */
-function imagesByPlace(content: unknown): unknown {
-	const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
-	if (!Array.isArray(blocks)) return content;
-	const placed: unknown[] = [];
-	for (const block of blocks) {
-		if (!isObject(block)) return content;
-		const previous = placed.at(-1);
-		if (block.type === "image") placed.push(block);
-		else if (isObject(previous) && previous.type === "image" && block.type === "text" && typeof block.text === "string" && block.text.startsWith("[Image: source: ") && block.text.endsWith("]")) continue;
-		else placed.push(block);
-	}
-	return placed;
 }
 
 // A prompt either came from Claude Code's query (the prompt form) or from an
@@ -181,11 +177,19 @@ function promptMatches(record: TranscriptRecord, message: PiMessage): boolean {
 // failed one as its text; sameContent reads a string as one text block, and
 // images compare by content. `toolName` is the name of the call the result
 // answers, in Claude Code's transcript.
-function toolResultMatches(block: Record<string, unknown>, message: PiMessage, toolName: string | undefined): boolean {
-	if ((block.is_error === true) !== ((message as { isError?: boolean }).isError === true)) return false;
-	const content = message.content as Parameters<typeof toolResultContentToAnthropic>[0];
+function matchToolResult(block: NativeToolResult, message: PiToolResult, toolName: string | undefined, transcriptPath: string, metadata: "sdk" | "literal"): SavedOriginalImage[] | undefined {
+	if ((block.is_error === true) !== (message.isError === true)) return undefined;
+	const native = nativeResultContentSchema.safeParse(block.content);
+	if (!native.success) return undefined;
+	const content = message.content;
 	const expected = [deliveredResultForm(message, toolName), toolResultContentToAnthropic(content) || ""];
-	return sameContent(imagesByPlace(block.content), expected.map(imagesByPlace));
+	for (const form of expected) {
+		const own = nativeResultContentSchema.safeParse(form);
+		if (!own.success) continue;
+		const stored = verifiedStoredImages(native.data, own.data, transcriptPath, metadata);
+		if (sameContent(stored.content, [own.data])) return stored.originals;
+	}
+	return undefined;
 }
 
 /** The block the bridge's stream records in Pi for a block of Claude Code's
@@ -239,11 +243,12 @@ function streamedMatches(blocks: unknown[], message: PiMessage, customToolNameTo
 	const assistant = message as { provider?: unknown; api?: unknown; content?: unknown };
 	if (assistant.provider !== PROVIDER_ID && assistant.api !== "anthropic") return false;
 	const content = assistant.content;
-	if (!Array.isArray(content) || content.length !== blocks.length) return false;
-	return blocks.every((block, n) => {
+	const mirrored = blocks.flatMap(block => {
 		const streamed = streamedPiBlock(block, customToolNameToPi);
-		return streamed !== undefined && (isDeepStrictEqual(streamed, storedPiBlock(content[n])) || sameSignedThinking(block, content[n]));
+		return streamed === undefined ? [] : [{ block, streamed }];
 	});
+	if (!Array.isArray(content) || content.length !== mirrored.length) return false;
+	return mirrored.every(({ block, streamed }, n) => isDeepStrictEqual(streamed, storedPiBlock(content[n])) || sameSignedThinking(block, content[n]));
 }
 
 /** Whether Claude Code's message made of `blocks` is what a rebuild imports
@@ -268,6 +273,7 @@ function importedBlockMatches(native: unknown, expected: Record<string, unknown>
 
 /** Where a matched group ends in the chain. */
 interface GroupMatch {
+	originalImages: SavedOriginalImage[];
 	/** Index of the Pi message after the group. */
 	next: number;
 	/** Chain index of the last record the prefix keeps. */
@@ -293,7 +299,8 @@ function readTranscript(path: string): { records: TranscriptRecord[] } | { reaso
 		return { reason: (error as NodeJS.ErrnoException).code === "ENOENT" ? "old-session-missing" : "old-session-unreadable" };
 	}
 	const records: TranscriptRecord[] = [];
-	for (const line of text.split("\n")) {
+	// A parent session may still be appending its last record.
+	for (const line of text.slice(0, text.lastIndexOf("\n") + 1).split("\n")) {
 		if (!line.trim()) continue;
 		let value: unknown;
 		try {
@@ -354,7 +361,8 @@ export function planNativePrefix(
 	customToolNameToSdk?: Map<string, string>,
 	customToolNameToPi?: Map<string, string>,
 ): NativePrefixPlan {
-	const read = readTranscript(getSessionPath(oldSessionId, cwd, claudeDir));
+	const transcriptPath = getSessionPath(oldSessionId, cwd, claudeDir);
+	const read = readTranscript(transcriptPath);
 	if ("reason" in read) return { reason: read.reason };
 	const walked = mainChain(read.records);
 	if ("reason" in walked) return { reason: walked.reason };
@@ -392,7 +400,7 @@ export function planNativePrefix(
 	// records, and the steers that match Pi's user messages. The prefix keeps
 	// them up to a queued_command that matches none, never cutting on a
 	// progress record (forkSession does not copy those).
-	const trailing = (from: number, last: number, next: number, verified: string[] = []): GroupMatch => {
+	const trailing = (from: number, last: number, next: number, verified: string[] = [], originalImages: SavedOriginalImage[] = []): GroupMatch => {
 		let end = from;
 		let cut = last;
 		const steers: string[] = [];
@@ -410,7 +418,7 @@ export function planNativePrefix(
 			cut = end;
 			end++;
 		}
-		return { next, last: cut, end, stop: end < chain.length && isQueuedCommand(chain[end]), stitched: verified, steers };
+		return { next, last: cut, end, stop: end < chain.length && isQueuedCommand(chain[end]), stitched: verified, steers, originalImages };
 	};
 
 	const matchPrompt = (at: number, index: number): GroupMatch | undefined => {
@@ -441,32 +449,64 @@ export function planNativePrefix(
 		if (typeof messageId !== "string") return undefined;
 		let position = at;
 		const blocks: unknown[] = [];
-		while (position < chain.length && chain[position].type === "assistant" && recordMessage(chain[position]).id === messageId) {
-			const content = recordMessage(chain[position]).content;
-			if (!Array.isArray(content)) return undefined;
-			blocks.push(...content);
+		const own = new Set<string>();
+		const answeredOwn = new Set<string>();
+		const allCalls: NativeToolCall[] = [];
+		const ownResults = (record: TranscriptRecord | undefined): string[] | undefined => {
+			const content = Boolean(record) && record.type === "user" ? recordMessage(record).content : undefined;
+			const parsed = toolResultsSchema.safeParse(content);
+			if (!parsed.success || parsed.data.length === 0) return undefined;
+			const ids = parsed.data.map(block => block.tool_use_id);
+			return ids.every(id => own.has(id) && !answeredOwn.has(id)) ? ids : undefined;
+		};
+		const sameMessage = (record: TranscriptRecord | undefined): boolean => Boolean(record) && record.type === "assistant" && recordMessage(record).id === messageId;
+		while (position < chain.length) {
+			if (sameMessage(chain[position])) {
+				const content = recordMessage(chain[position]).content;
+				if (!Array.isArray(content)) return undefined;
+				blocks.push(...content);
+				for (const block of content) {
+					const call = toolCallSchema.safeParse(block);
+					if (call.success) {
+						allCalls.push(call.data);
+						if (streamedPiBlock(block, customToolNameToPi) === undefined) own.add(call.data.id);
+					}
+				}
+				position++;
+				continue;
+			}
+			const answered = sameMessage(chain[position + 1]) ? ownResults(chain[position]) : undefined;
+			if (!Boolean(answered)) break;
+			for (const id of answered) answeredOwn.add(id);
 			position++;
 		}
-		if (!streamedMatches(blocks, priors[index], customToolNameToPi) && !importedMatches(blocks, priors[index], customToolNameToSdk)) return undefined;
+		if (!streamedMatches(blocks, priors[index], customToolNameToPi)) {
+			if (!importedMatches(blocks, priors[index], customToolNameToSdk) || answeredOwn.size > 0) return undefined;
+			own.clear();
+		}
 		let last = position - 1;
 		let next = index + 1;
 		const verified: string[] = [];
-		const calls = blocks.filter((block) => isObject(block) && block.type === "tool_use") as Array<{ id: string; name: string }>;
+		const originalImages: SavedOriginalImage[] = [];
+		const calls = allCalls.filter(call => !own.has(call.id));
 		const callIds = calls.map((call) => call.id);
 		const callNames = new Map(calls.map((call) => [call.id, call.name]));
+		if (callIds.length === 0 && priors[index + 1]?.role === "toolResult") return undefined;
 		if (callIds.length > 0) {
 			// Pi's results follow the assistant directly and answer exactly its
 			// calls; anything else (a steer between them, a split batch) ends
 			// the prefix before this group. A call's id is Pi's as the stream
 			// recorded it, or sanitized as an earlier rebuild imported it.
 			const ids = new Map<string, string>();
-			const results = new Map<string, PiMessage>();
-			while (next < priors.length && priors[next].role === "toolResult") {
-				const raw = (priors[next] as { toolCallId: string }).toolCallId;
+			const results = new Map<string, PiToolResult>();
+			while (next < priors.length) {
+				const result = priors[next];
+				if (result.role !== "toolResult") break;
+				const raw = result.toolCallId;
 				const clean = sanitizeToolId(raw, ids);
 				if (results.has(raw) || results.has(clean)) return undefined;
-				results.set(raw, priors[next]);
-				if (clean !== raw) results.set(clean, priors[next]);
+				results.set(raw, result);
+				if (clean !== raw) results.set(clean, result);
 				next++;
 			}
 			if (next - (index + 1) !== callIds.length || new Set(callIds.map((id) => results.get(id))).size !== callIds.length || callIds.some((id) => !results.has(id))) return undefined;
@@ -475,12 +515,23 @@ export function planNativePrefix(
 			// result for its call and the call's first.
 			const answers = (record: TranscriptRecord): boolean => {
 				const content = record.type === "user" ? recordMessage(record).content : undefined;
-				if (!Array.isArray(content) || content.length === 0 || !content.every((block) => isObject(block) && block.type === "tool_result")) return false;
-				for (const block of content as Array<Record<string, unknown>>) {
+				const parsed = toolResultsSchema.safeParse(content);
+				if (!parsed.success || parsed.data.length === 0) return false;
+				// Results from the SDK retain toolUseResult; Pi imports contain only the message.
+				const metadata = Object.hasOwn(record, "toolUseResult") ? "sdk" : "literal";
+				for (const block of parsed.data) {
 					const id = block.tool_use_id;
-					const result = typeof id === "string" ? results.get(id) : undefined;
-					if (!result || answered.has(id as string) || !toolResultMatches(block, result, callNames.get(id as string))) return false;
-					answered.add(id as string);
+					if (own.has(id)) {
+						if (answeredOwn.has(id)) return false;
+						answeredOwn.add(id);
+						continue;
+					}
+					const result = results.get(id);
+					if (!Boolean(result) || answered.has(id)) return false;
+					const originals = matchToolResult(block, result, callNames.get(id), transcriptPath, metadata);
+					if (!Boolean(originals)) return false;
+					originalImages.push(...originals);
+					answered.add(id);
 				}
 				return true;
 			};
@@ -508,7 +559,20 @@ export function planNativePrefix(
 				position++;
 			}
 		}
-		return trailing(position, last, next, verified);
+		while (answeredOwn.size < own.size) {
+			const record = chain[position];
+			if (!Boolean(record)) return undefined;
+			if (isTrailingCarry(record)) {
+				position++;
+				continue;
+			}
+			const ids = ownResults(record);
+			if (!Boolean(ids)) return undefined;
+			for (const id of ids) answeredOwn.add(id);
+			last = position;
+			position++;
+		}
+		return trailing(position, last, next, verified, originalImages);
 	};
 
 	let position = 0;
@@ -538,7 +602,7 @@ export function planNativePrefix(
 		}
 		if (!group) break;
 		index = group.next;
-		ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched, steers: group.steers });
+		ends.push({ piCount: group.next, cut: group.last, stitched: group.stitched, steers: group.steers, originalImages: group.originalImages });
 		position = group.end;
 		if (group.stop) break;
 	}
@@ -565,6 +629,8 @@ export function planNativePrefix(
 	return {
 		prefix: {
 			oldSessionId,
+			transcriptPath,
+			originalImages: ends.slice(0, ends.indexOf(end) + 1).flatMap(group => group.originalImages),
 			records: read.records,
 			cutUuid: chain[cut].uuid!,
 			piCount,
@@ -573,7 +639,7 @@ export function planNativePrefix(
 	};
 }
 
-type PrefixEnd = { piCount: number; cut: number; stitched: string[]; steers: string[] };
+type PrefixEnd = { piCount: number; cut: number; stitched: string[]; steers: string[]; originalImages: SavedOriginalImage[] };
 
 /**
  * The last of `ends` whose fork carries exactly the verified records.

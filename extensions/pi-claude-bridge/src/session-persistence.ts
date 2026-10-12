@@ -3,13 +3,15 @@ import { createSession, deleteSession, openSession, repairToolPairing, serialize
 import { createHash } from "crypto";
 import { closeSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname, resolve as pathResolve } from "path";
-import { REBUILD_MARKS, getExtensionApi, getSharedSession, reportSyntheticToolResultRepair, safeNotify, setSharedSession, type RebuildMark, type SessionState } from "./bridge-state.ts";
+import { REBUILD_MARKS, getExtensionApi, getSharedSession, reportSyntheticToolResultRepair, safeNotify, setSharedSession, type SessionState } from "./bridge-state.ts";
+import { z } from "zod";
 import { displayPath } from "./config.ts";
 import { convertPiMessages, lastConversationIndex } from "./convert.ts";
 import { debug, diagDump, diagGuidance, parseErrorShape } from "./debug.ts";
 import { noteAnomaly } from "./agent-notice.ts";
 import { UNVERIFIED_HISTORY_DIGEST, historyDigest, sharedHistoryMatches } from "./history-digest.ts";
 import { forkNativePrefix, planNativePrefix, type ForkedPrefix, type NativePrefix } from "./native-fork.ts";
+import { carrySavedImages } from "./native-images.ts";
 import { stepEnd, stepStart, type SyncTiming } from "./request-timing.ts";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.ts";
 import { INTERRUPTED_MARKER, promptRunStart } from "./user-prompt.ts";
@@ -33,6 +35,17 @@ interface PersistedBridgeSessionState extends Omit<SessionState, "claudeConfigDi
 	piSessionId?: string;
 	updatedAt: string;
 }
+
+const persistedMetadataSchema = z.object({
+	conversationFingerprint: z.string().optional(),
+	historyDigest: z.string().optional(),
+	trailingAssistantDigest: z.string().optional(),
+	needsRebuild: z.boolean().optional(),
+	rebuildReason: z.enum(REBUILD_MARKS).optional(),
+	forceRotate: z.boolean().optional(),
+	accountProfileId: z.string().optional(),
+});
+type PersistedSessionMetadata = z.infer<typeof persistedMetadataSchema>;
 
 function normalizedMessageText(message: unknown): string {
 	const content = (message as { content?: unknown }).content;
@@ -199,13 +212,15 @@ export function shouldRestorePersistedBridgeEntry(
 	return undefined;
 }
 
-export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?: string }): void {
+/** Restores an own-session marker; explicit parent mode marks a fork's parent record for copying into a new session. */
+export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?: string }, source: "own" | "parent" = "own"): void {
 	const persisted = latestPersistedBridgeSession(ctx.sessionManager);
 	if (!persisted) return;
 	const currentPiSessionId = typeof (ctx.sessionManager as any)?.getSessionId === "function" ? (ctx.sessionManager as any).getSessionId() : undefined;
 	const currentCwd = typeof (ctx.sessionManager as any)?.getCwd === "function" ? (ctx.sessionManager as any).getCwd() : ctx.cwd;
 	const rejection = shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, currentCwd);
-	if (rejection) {
+	const inherited = source === "parent" && Boolean(currentPiSessionId) && Boolean(persisted.piSessionId) && persisted.piSessionId !== currentPiSessionId;
+	if (rejection && !inherited) {
 		debug(`restoreSharedSession: ${rejection} — forcing rebuild`);
 		return;
 	}
@@ -217,35 +232,38 @@ export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?
 		debug(`restoreSharedSession: fingerprint mismatch for ${persisted.sessionId.slice(0, 8)}`);
 		return;
 	}
-	// Only the opaque profile id is persisted; a managed session re-derives its
-	// claude dir through the live router (router absent or id unknown → the
-	// default-profile rule, which may fail the existence check and rebuild).
-	const accountProfileId = typeof persisted.accountProfileId === "string" ? persisted.accountProfileId : undefined;
+	const metadata = persistedMetadataSchema.safeParse(persisted);
+	if (!metadata.success) {
+		debug("restoreSharedSession: invalid session metadata; forcing rebuild");
+		return;
+	}
+	publishRestoredSession(persisted, cursor, metadata.data, inherited ? "parent" : "own");
+}
+
+function publishRestoredSession(persisted: PersistedBridgeSessionState, cursor: number, metadata: PersistedSessionMetadata, ownership: "own" | "parent"): void {
+	const accountProfileId = metadata.accountProfileId;
 	const claudeConfigDir = accountProfileId
 		? claudeDirForProfile(resolveClaudeAccountRouter()?.resolveProfile?.(accountProfileId) ?? {})
 		: undefined;
+	if (ownership === "parent") {
+		const parent: SessionState = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd, needsRebuild: true, rebuildReason: "inherited", inherited: true };
+		if (accountProfileId) {
+			parent.accountProfileId = accountProfileId;
+			parent.claudeConfigDir = claudeConfigDir;
+		}
+		setSharedSession(parent);
+		debug("restoreSharedSession: copying a parent transcript on the next rebuild", persisted.sessionId.slice(0, 8));
+		return;
+	}
 	if (!claudeSessionExists(persisted.sessionId, persisted.cwd, claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR)) {
 		debug(`restoreSharedSession: Claude session missing for ${persisted.sessionId.slice(0, 8)}`);
 		return;
 	}
 	setSharedSession({
+		...metadata,
 		sessionId: persisted.sessionId,
 		cursor,
 		cwd: persisted.cwd,
-		// Absent on pre-3.1.1 markers: restore as identity-unknown (the foreign
-		// guard fails open) rather than rejecting the entry.
-		...(typeof persisted.conversationFingerprint === "string" ? { conversationFingerprint: persisted.conversationFingerprint } : {}),
-		// The digest of the history Claude holds travels with the marker; absent
-		// on older markers, where the next REUSE adopts one (history-digest.ts).
-		...(typeof persisted.historyDigest === "string" ? { historyDigest: persisted.historyDigest } : {}),
-		...(typeof persisted.trailingAssistantDigest === "string" ? { trailingAssistantDigest: persisted.trailingAssistantDigest } : {}),
-		// A rebuild the record still owed must survive the restart: without it
-		// the next turn would resume a transcript known to differ from Pi's.
-		...(persisted.needsRebuild === true ? {
-			needsRebuild: true,
-			...(REBUILD_MARKS.includes(persisted.rebuildReason as RebuildMark) ? { rebuildReason: persisted.rebuildReason } : {}),
-		} : {}),
-		...(persisted.forceRotate === true ? { forceRotate: true } : {}),
 		...(accountProfileId ? { accountProfileId, claudeConfigDir } : {}),
 	});
 	debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}, account=${accountProfileId ?? "default"}`);
@@ -291,6 +309,7 @@ export function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknow
 	const sharedSession = getSharedSession();
 	const extensionApi = getExtensionApi();
 	if (!extensionApi || !sharedSession || !ctxLike?.sessionManager) return;
+	if (Boolean(sharedSession.inherited)) return;
 	// Extension contexts become guarded/stale as soon as shutdown or replacement
 	// starts. Capture the plain SessionManager reference now and cancel the timer
 	// on shutdown rather than dereferencing the ctx proxy from the next tick.
@@ -716,15 +735,17 @@ export function syncSharedSession(
 	// existing UUID), so prompt-cache UUIDs stay stable for log correlation
 	// and for any tools that key off them. Skipped only when there's a
 	// concurrent writer we shouldn't race — see forceRotate docs above.
-	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
+	const inherited = Boolean(sharedSession) && Boolean(sharedSession.inherited);
+	const preserveId = previousSessionId !== undefined && !sharedSession.forceRotate && !inherited;
 	// The branch the debug lines below name, plus why REUSE did not apply.
 	const cause = replacedSessionId === undefined ? "first-turn-history"
 		: !sameAccount ? "account-rotation"
+		: inherited ? "inherited"
 		: !preserveId ? "post-abort-rotation"
 		: sharedSession?.needsRebuild ? "needs-rebuild"
 		: digestCause ?? "missed-messages";
 	if (previousSessionId !== undefined && options.fork !== false) {
-		const plan = planNativePrefix(priorMessages, previousSessionId, cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi);
+		const plan = planNativePrefix(priorMessages, previousSessionId, inherited ? sharedSession.cwd : cwd, claudeDir, customToolNameToSdk, options.customToolNameToPi);
 		if ("prefix" in plan) {
 			return rebuildFromNativePrefix(plan.prefix, {
 				messages, cwd, customToolNameToSdk, modelId, account, options,
@@ -899,6 +920,7 @@ async function rebuildFromNativePrefix(prefix: NativePrefix, c: ForkRebuildConte
 		return replan(`the forked session ${forked.sessionId.slice(0, 8)} failed verification (${warnings.length} warning(s))`);
 	}
 	stepEnd("rebuildWrite", writeStarted);
+	carrySavedImages(prefix.originalImages, prefix.transcriptPath, session.jsonlPath);
 	// The old file goes only now that its replacement is written and verified.
 	// After an abort it stays: the killed child may still be writing to it.
 	if (c.preserveId) deleteSession(prefix.oldSessionId, c.cwd, c.claudeDir);

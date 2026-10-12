@@ -69,6 +69,8 @@ export function buildStreamIdleTimeoutErrorMessage(timeoutMs: number): string {
 	return `Claude Code stream idle timeout after ${formatDurationShort(timeoutMs)} with no output from Claude Code; treating stalled stream as retryable 529 overloaded/rate limit condition. Retry after ${formatDurationShort(STREAM_IDLE_BACKOFF_HINT_MS)}.`;
 }
 
+export const REPEATED_STALL_ERROR_MESSAGE = "Claude Code gave no model response on two consecutive attempts. Automatic retries have stopped. Try /compact to reduce the conversation before sending the message again.";
+
 /** How long an idle check waits before looking again while the silence is
  *  the bridge's own (see `waitingOnBridge`). Bounds how much of that wait can
  *  be miscounted as child silence once it ends. */

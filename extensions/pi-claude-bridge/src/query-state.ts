@@ -537,6 +537,7 @@ export class QueryContext {
 	// replayed on another account (duplicate side effects). Query-scoped, not per-turn:
 	// resetTurnState must not clear it.
 	committedOutput = false;
+	apiResponded = false;
 	/** True when this query holds NO claim on the module-level shared session
 	 *  record: a foreign-conversation one-shot, or a query quarantined after
 	 *  an abort or stream-idle timeout.

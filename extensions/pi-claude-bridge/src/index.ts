@@ -35,7 +35,7 @@ import { appendIntegrityEntry, argKeyCount, argKeys, deleteSharedSessionLane, ge
 import { primeConnectorServers } from "./connector-runtime.ts";
 import { cancelScheduledSessionPersistence, conversationFingerprint, isForeignConversation, restoreSharedSessionFromPi, schedulePersistSharedSession, syncSharedSession, type SyncResult } from "./session-persistence.ts";
 import { UNVERIFIED_HISTORY_DIGEST, deliveredAssistantDigest, deliveredSuffix, historyDigest } from "./history-digest.ts";
-import { STREAM_IDLE_BACKOFF_HINT_MS, activeStreamIdleWatchdogs, buildStreamIdleTimeoutErrorMessage, createStreamIdleWatchdog, formatDurationShort, streamIdleTimeoutMsFromEnv } from "./stream-idle-watchdog.ts";
+import { REPEATED_STALL_ERROR_MESSAGE, STREAM_IDLE_BACKOFF_HINT_MS, activeStreamIdleWatchdogs, buildStreamIdleTimeoutErrorMessage, createStreamIdleWatchdog, formatDurationShort, streamIdleTimeoutMsFromEnv } from "./stream-idle-watchdog.ts";
 import { RATE_LIMIT_TOKEN, formatResetTimestamp } from "./rate-limit.ts";
 import { mapToolArgs, markAuthoritativeManifest, mcpToolAliases } from "./tool-mapping.ts";
 import { ABORTED_MESSAGE, endStreamForFailure, finalizeCurrentStream, finalizeToolUseTurnFromMcpInvocation, markContinuationStart, scheduleToolUseTurnEnd, terminalMessage, updateTurnResponseModel, withdrawCancelledToolCall } from "./assistant-stream.ts";
@@ -1154,6 +1154,7 @@ function streamRequestInLane(
 	ctx().instructionsChanged = null;
 	ctx().userInputNeedsRebuild = false;
 	ctx().committedOutput = false;
+	ctx().apiResponded = false;
 	ctx().piHistoryReplaced = false;
 	ctx().historyReplacedAfterQuery = false;
 	ctx().reportedHistoryRestartDecline = false;
@@ -1516,6 +1517,8 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	};
 	const persistSession = (next: SessionState | null): void => {
 		if (foreignContext || abortCtx.detachedFromSharedSession) return;
+		const live = getSharedSession();
+		if (Boolean(next) && Boolean(live) && Boolean(live.inherited) && next.sessionId === live.sessionId) return;
 		const restartPending = Boolean(abortCtx.restartRequest);
 		let replaced = next;
 		// A mid-query user message the ledger could not identify is owned by
@@ -1637,6 +1640,13 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 				quarantine("idle-timeout");
 				const errorMessage = buildStreamIdleTimeoutErrorMessage(timeoutMs);
 				debug("provider: stream idle timeout", `model=${queryModel.id}`, `timeout=${timeoutMs}`, `idle=${idleMs}`);
+				if (syncResult.sync.path === "rebuild" && syncResult.sync.mark === "idle-timeout" && !abortCtx.apiResponded) {
+					abortCtx.handledTerminalError = true;
+					debug("provider: consecutive unanswered attempts; stopping automatic retries");
+					endStreamForFailure(abortCtx, { errorMessage: REPEATED_STALL_ERROR_MESSAGE, fields: { streamIdleTimeoutMs: timeoutMs } });
+					requestAbort();
+					return;
+				}
 				const idleFailure: ClaudeAttemptFailure = { kind: "network", message: errorMessage };
 				// A managed attempt that went idle before ANY visible output can move
 				// to the next profile instead of surfacing the timeout. The idle
@@ -2057,16 +2067,14 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
-		// Note: "fork" intentionally omitted from restoration. createBranchedSession
-		// copies the parent's persisted bridge entries into the fork; restoring from
-		// them would --resume the parent's Claude jsonl and leak conversation past the
-		// fork point. Letting the first fork turn rebuild is the correct path.
+		// A fork may copy the parent's verified prefix into a new Claude session,
+		// but must never resume or overwrite the parent's transcript.
 		// "reload" restores like "startup": its shutdown dropped the record, and
 		// without it the next prompt rebuilds Claude's session with a cold cache.
 		if (event.reason === "reload" && takeReloadWithLiveWriter(ctx.sessionManager)) {
 			debug("restoreSharedSession: a Claude Code child may still write the session at the reload — forcing rebuild");
-		} else if (event.reason === "startup" || event.reason === "resume" || event.reason === "reload") {
-			restoreSharedSessionFromPi(ctx);
+		} else if (event.reason === "startup" || event.reason === "resume" || event.reason === "reload" || event.reason === "fork") {
+			restoreSharedSessionFromPi(ctx, event.reason === "fork" ? "parent" : "own");
 		}
 		// Live availability flip: re-evaluate credential presence every
 		// session_start so login/logout since load is reflected without /reload.

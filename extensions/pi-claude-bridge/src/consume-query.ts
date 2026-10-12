@@ -210,6 +210,7 @@ export async function consumeQuery(
 
 		switch (message.type) {
 			case "stream_event":
+				queryCtx.apiResponded = true;
 				queryCtx.timing?.phase("firstStreamEvent");
 				if (!streamLive) break;
 				processStreamEvent(message, customToolNameToPi, model, queryCtx);
@@ -230,6 +231,7 @@ export async function consumeQuery(
 					if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: notice || String(sdkError) });
 					break;
 				}
+				if (message.message.model !== "<synthetic>") queryCtx.apiResponded = true;
 				if (!streamLive && !queryCtx.turnSawToolCall) break;
 				processAssistantMessage(message, model, customToolNameToPi, queryCtx);
 				break;
