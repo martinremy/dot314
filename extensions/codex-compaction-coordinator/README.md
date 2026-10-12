@@ -41,7 +41,7 @@ The selected mode is session-wide and remains active when navigating with `/tree
 
 Prewarming runs in the background without delaying active Codex requests. A non-Codex switch joins work already in progress and waits only for unfinished work. Switching to `lazy` stops new background calls, while completed results are saved automatically.
 
-Prewarming while a Codex model is active requires grounded-compaction's `defaultPreset` to name a configured non-Codex preset. The `current` preset can't proactively summarize with the active Codex model.
+Prewarming while a Codex model is active requires grounded-compaction's `defaultPreset` to name a configured preset. The `current` preset can't summarize while a Codex model is active.
 
 ## Costs and failure policy
 
