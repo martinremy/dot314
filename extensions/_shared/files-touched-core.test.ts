@@ -514,6 +514,18 @@ test("collectFilesTouched keeps command separators next to redirections", async 
 	);
 });
 
+test("collectFilesTouched resolves relative paths against an earlier cd in the same command", async () => {
+	for (const tool of [{ name: "bash" } as const, { name: "exec_command", workdir: "pkg" } as const]) {
+		const prefix = tool.name === "bash" ? "" : "pkg/";
+		assert.deepEqual(await recordShellCommand("cd sub && cat a.md > out.txt", tool), [`R ${prefix}sub/a.md`, `W ${prefix}sub/out.txt`]);
+		assert.deepEqual(await recordShellCommand("cd sub; cd deeper\nrm -f x.log", tool), [`D ${prefix}sub/deeper/x.log`]);
+		assert.deepEqual(await recordShellCommand("cd sub && mv a.txt ../b.txt", tool), [`M ${prefix}b.txt`]);
+		assert.deepEqual(await recordShellCommand("cat a.md && cd sub && cat a.md", tool), [`R ${prefix}a.md`, `R ${prefix}sub/a.md`]);
+		assert.deepEqual(await recordShellCommand("cd sub && sed -i '' \\\n  -e 's/a/b/' cfg.ts", tool), [`E ${prefix}sub/cfg.ts`]);
+		assert.deepEqual(await recordShellCommand('cd "$DIR" && cat a.md', tool), []);
+	}
+});
+
 test("parseCompletedCodexFileActions rebases real operands and redirect destinations only", async () => {
 	assert.deepEqual(
 		await recordShellCommand("mv a.txt b.txt 2>err.log", { name: "exec_command", workdir: "pkg" }),

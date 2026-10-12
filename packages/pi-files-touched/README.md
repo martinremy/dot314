@@ -16,7 +16,7 @@ pi install npm:pi-files-touched
 
 - **Pi native tools**: `read`, `write`, `edit` tool calls matched with their tool results
 - **RepoPrompt tools**: `rp` and `rp_exec` tool calls: `read_file`, `apply_edits`, `file_actions` (create/move/delete), `git mv`, `git rm`
-- **Bash commands**: `sed -i` (edit), `cp`/`rsync` (write destination), `tee`/`touch` (write), `patch` (edit), `curl -o`/`wget -O` (write), `cat`/`head`/`tail` (read), shell output redirections to files (`>`, `>>`, `>|`, and file-descriptor forms such as `2>`, `2>>`, and `&>`), `mv` (move), `rm`/`trash` (delete), heredoc body filtering
+- **Bash commands**: `sed -i` (edit), `cp`/`rsync` (write destination), `tee`/`touch` (write), `patch` (edit), `curl -o`/`wget -O` (write), `cat`/`head`/`tail` (read), shell output redirections to files (`>`, `>>`, `>|`, and file-descriptor forms such as `2>`, `2>>`, and `&>`), `mv` (move), `rm`/`trash` (delete), heredoc body filtering. Relative paths resolve against the directory set by an earlier literal `cd` in the same command; after a `cd` to a computed directory such as `cd "$DIR"`, relative paths are skipped and reported as incomplete
 - **Codex filesystem tools when present in the session**: `exec_command` uses the same high-confidence literal shell coverage relative to its effective working directory; `apply_patch` records completed adds, updates, deletes, and moves, including the completed portion of a partial patch
 - **Nested Code and Notebook tools**: `@howaboua/pi-codex-conversion` calls through `exec` and `wait`, including nested Pi tools, `apply_patch`, `exec_command`, `rp`, and `rp_exec`
 - **RepoPrompt CLIs through shell tools**: `rp-cli` and `rpce-cli`, using inline JSON with `-c`/`--call` and `-j`/`--json`, or commands with `-e`/`--exec`

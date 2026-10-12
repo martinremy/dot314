@@ -503,7 +503,8 @@ function tokenizeShellCommand(cmd: string): string[] {
 		const next = cmd[index + 1] ?? "";
 
 		if (escaped) {
-			current += char;
+			// A backslash-newline is a line continuation and adds nothing to the word
+			if (char !== "\n") current += char;
 			escaped = false;
 			continue;
 		}
@@ -1162,12 +1163,40 @@ export function parseCompletedCodexFileActions(args: {
 	}).actions;
 }
 
+/**
+ * The directory that relative paths in a shell command resolve against: the tool's own directory, a literal directory
+ * reached by `cd`, or unknown after a `cd` whose target cannot be read literally.
+ */
+type ShellDirectory = { kind: "tool" } | { kind: "known"; path: string } | { kind: "unknown" };
+
+/** Applies one `cd` (its arguments after the command name) to the current directory */
+function changeShellDirectory(args: string[], current: ShellDirectory, workdir: string | undefined): ShellDirectory {
+	const target = args.filter((arg) => arg !== "--" && !/^-[LPe@]+$/.test(arg)).at(0);
+	if (target === undefined || target === "-" || !isLiteralShellPathOperand(target) || current.kind === "unknown") {
+		return { kind: "unknown" };
+	}
+	const base = current.kind === "known" ? current.path : workdir;
+	return { kind: "known", path: resolvePathFromBase(target, base) };
+}
+
+/** Resolves one command's actions in `directory`; after an unreadable `cd`, relative paths are dropped as missing evidence */
+function resolveShellActions(actions: FileAction[], directory: ShellDirectory, workdir: string | undefined): ParsedFileActions {
+	if (directory.kind === "known") return { actions: rebaseShellActions(actions, directory.path), incomplete: false };
+	if (directory.kind === "tool") return { actions: workdir === undefined ? actions : rebaseShellActions(actions, workdir), incomplete: false };
+	const absolute = actions.filter((action) => (action.kind === "move" ? [action.from, action.to] : [action.path]).every(isAbsolutePath));
+	return { actions: absolute, incomplete: absolute.length < actions.length };
+}
+
 function parseShellFileActions(cmd: string, workdir?: string): ParsedFileActions {
 	const result: ParsedFileActions = { actions: [], incomplete: false };
+	let directory: ShellDirectory = { kind: "tool" };
 	for (const source of splitCommandSources(stripHeredocBodies(cmd))) {
 		const parsedCommand = parseShellCommand(source);
-		result.actions.push(...(workdir === undefined ? parsedCommand.actions : rebaseShellActions(parsedCommand.actions, workdir)));
+		const resolved = resolveShellActions(parsedCommand.actions, directory, workdir);
+		result.actions.push(...resolved.actions);
+		result.incomplete ||= resolved.incomplete;
 		const command = parsedCommand.command;
+		if (command[0] === "cd") directory = changeShellDirectory(command.slice(1), directory, workdir);
 		if (!command[0] || !["rp-cli", "rpce-cli"].includes(path.basename(command[0]))) continue;
 		const parsed = parseRepoPromptCliActions(command.slice(1));
 		result.incomplete ||= parsed.incomplete;
