@@ -114,7 +114,7 @@ See [extensions/README.md](extensions/README.md) for more detailed descriptions.
 | ● | `model-aware-compaction/` | [`pi-model-aware-compaction`](https://www.npmjs.com/package/pi-model-aware-compaction) | Per-model compaction thresholds |
 | ● | `model-sysprompt-appendix/` | [`pi-model-sysprompt-appendix`](https://www.npmjs.com/package/pi-model-sysprompt-appendix) | Per-model system prompt additions |
 | ● | `move-session.ts` | [`pi-move-session`](https://www.npmjs.com/package/pi-move-session) | Move current active session to a new cwd |
-| ◐ | [`pi-claude-bridge/`](extensions/pi-claude-bridge/README.md) | | Claude Agent SDK bridge for ToS-compliant Claude subscriptions usage in Pi |
+| ◐ | `pi-claude-bridge/` | | Claude Agent SDK bridge for ToS-compliant Claude subscriptions usage in Pi |
 | ◐ | `pi-queue-steer/` | | Editable steering and follow-up queues with RepoPrompt-aware interruption events |
 | ● | `protect-paths/` | | Blocks `.git/` access and `node_modules/` writes (reads allowed), brew installs, and asks before deletes or piped shells. Pair with [`@aliou/pi-guardrails`](https://github.com/aliou/pi-guardrails) for `.env` protection |
 | ● | `repoprompt-mcp/` | [`pi-repoprompt-mcp`](https://www.npmjs.com/package/pi-repoprompt-mcp) | RepoPrompt MCP proxy with adaptive diff rendering, collapsed outputs, read-cache, and branch-safe binding |
