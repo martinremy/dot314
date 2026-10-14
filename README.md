@@ -179,7 +179,7 @@ These other extensions have also improved my QoL in Pi, so I recommend checking 
 | [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model) (nicobailon) | Adds `model`, `skill`, and `thinking` frontmatter to pi prompt templates and chained prompt template execution | `pi install npm:pi-prompt-template-model` |
 | [pi-retry](https://github.com/monotykamary/pi-retry) (monotykamary) | Automatically retries most errors with capped backoff and continues after output-token limits | `pi install https://github.com/monotykamary/pi-retry` |
 | [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook) (nicobailon) | Records exact rewind points for files, allowing restoration during `/tree` navigation and across resumed and forked sessions | `pi install npm:pi-rewind-hook` |
-| [pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer) (MasuRii) | Read-tool-kit context optimization for token efficiency | `pi install npm:pi-rtk-optimizer` |
+| [pi-rtk-optimizer](https://github.com/MasuRii/pi-rtk-optimizer) (MasuRii) | Rewrites bash commands to their [RTK](https://github.com/rtk-ai/rtk) equivalents and compacts noisy tool output to save tokens | `pi install npm:pi-rtk-optimizer` |
 | [pi-token-burden](https://github.com/Whamp/pi-token-burden) (Whamp) | Token usage breakdown and context burden analysis | `pi install npm:pi-token-burden` |
 | [pi-tool-display](https://github.com/MasuRii/pi-tool-display) (MasuRii) | Compact tool call rendering with diff visualization | `pi install npm:pi-tool-display` |
 | [pi-web-access](https://github.com/nicobailon/pi-web-access) (nicobailon) | Gemini-powered web search with AI-synthesized overviews and citations | `pi install npm:pi-web-access` |
