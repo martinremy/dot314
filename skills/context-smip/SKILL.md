@@ -12,7 +12,7 @@ The coordinator gathers context with smip and delegates reasoning to the existin
 
 Confirm the task, absolute source roots/worktrees, Git state, required plan/documents, and review comparisons. Ask when a comparison is ambiguous. Capture changed, untracked and deleted paths appropriate to that comparison. Retain the original user requirements and approved boundary.
 
-Use `/Users/ww/smip/dist/cli/main.js` with Node. The operator must provide an absolute path to smip's host configuration, directly or through `SMIP_CONFIG_PATH`. If configuration, authentication, the native executable or search is unavailable, report the exact setup blocker. Do not change Pi settings, install packages, invent credentials, or substitute another context provider.
+Use `/Users/ww/smip/dist/cli/main.js` with Node. The configured host file is `/Users/ww/.config/smip/config.json`; use the operator's explicit path or `SMIP_CONFIG_PATH` when one is supplied. Pass the chosen absolute path with `--config`. If configuration, authentication, the native executable or search is unavailable, report the exact setup blocker. Do not change Pi settings, install packages, invent credentials, or substitute another context provider.
 
 Create a unique run directory under the primary repository's `prompt-exports/` directory with an existing output directory. Exclude this run's transient files from source discovery and review scope. Keep durable plans/reports in the repository's normal locations.
 
