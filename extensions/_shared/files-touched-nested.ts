@@ -12,7 +12,6 @@ type ToolResultMessage = Extract<Extract<SessionEntry, { type: "message" }>["mes
 type NestedToolCalls = NonNullable<ToolResultMessage["nestedCalls"]>;
 type FileMessage = { role: string; toolCallId?: string; details?: unknown; nestedCalls?: NestedToolCalls };
 type NestedFileAction = { action: FileAction; message: FileMessage };
-type NestedFileActions = { actions: NestedFileAction[]; incompleteKeys: string[] };
 type CellState = {
 	id: string;
 	seen: Map<string, string>;
@@ -202,22 +201,20 @@ function readMessageEvidence(message: FileMessage, cwd: string | null | undefine
 }
 
 /** Reads saved file records, pi-codex-conversion traces, or Pi's nested call records, deduplicated by nested call ID in message order. */
-export function collectNestedFileActions(messages: readonly FileMessage[], cwd: string | null | undefined, parse: FileCallParser): NestedFileActions {
+export function collectNestedFileActions(messages: readonly FileMessage[], cwd: string | null | undefined, parse: FileCallParser): NestedFileAction[] {
 	const seen = new Set<string>();
 	const actions: NestedFileAction[] = [];
-	const incompleteKeys: string[] = [];
-	for (const [index, message] of messages.entries()) {
+	for (const message of messages) {
 		if (message.role !== "toolResult") continue;
 		const evidence = readMessageEvidence(message, cwd, parse);
 		if (!evidence) continue;
-		if (evidence.incomplete) incompleteKeys.push(message.toolCallId ?? `message:${index}`);
 		for (const call of evidence.calls) {
 			if (seen.has(call.toolCallId)) continue;
 			seen.add(call.toolCallId);
 			for (const action of call.actions) actions.push({ action, message });
 		}
 	}
-	return { actions, incompleteKeys };
+	return actions;
 }
 
 /** Records PCC completion events; traces supply cell ownership, never live arguments or outcomes. */
@@ -313,12 +310,9 @@ export function registerNestedFileTracking(pi: FileTrackingHost, parse: FileCall
 		const evidence = cell.evidence;
 		cell.evidence = { version: 1, calls: [], incomplete: false };
 		outerCells.delete(event.toolCallId);
-		if (evidence.incomplete) {
-			console.warn({ component: "files-touched", code: "INCOMPLETE_NESTED_FILE_ACTIVITY", toolCallId: event.toolCallId });
-			if (ctx.hasUI && !warned) {
-				warned = true;
-				ctx.ui.notify("Files-touched coverage is partial. Further gaps are logged; known operations remain available.", "warning");
-			}
+		if (evidence.incomplete && ctx.hasUI && !warned) {
+			warned = true;
+			ctx.ui.notify("Files-touched coverage is partial; known operations remain available.", "warning");
 		}
 		const details = Object.assign({}, event.details, { filesTouched: evidence });
 		return { details };

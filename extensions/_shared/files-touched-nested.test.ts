@@ -254,11 +254,14 @@ test("partial patches retain confirmed changes and cancelled calls add no edits"
 	assert.deepEqual(files.map((file) => file.path), ["/project/yes.ts"]);
 });
 
-test("missing or truncated evidence warns without failing the enclosing tool", () => {
+test("missing or truncated evidence warns once in the UI without failing the enclosing tool", (t) => {
+	const consoleWarn = t.mock.method(console, "warn", () => {});
 	const h = harness();
 	const saved = h.finish(snapshot([trace("lost", "edit", { path: "[value truncated]" })], "result", 1));
 	assert.deepEqual(collectFilesTouched(saved, cwd), []);
 	assert.equal(h.warnings.length, 1);
+	// Console output lands on Pi's TUI screen
+	assert.equal(consoleWarn.mock.callCount(), 0);
 });
 
 test("Pi codemode call records attribute completed file tools like direct calls", () => {
@@ -275,9 +278,11 @@ test("Pi codemode call records attribute completed file tools like direct calls"
 	]);
 });
 
-test("Pi codemode records that lost file-tool evidence report incomplete attribution", (t) => {
+test("evidence gaps in saved history drop unknown operations without console output", (t) => {
 	const warn = t.mock.method(console, "warn", () => {});
 	const files = collectFilesTouched([
+		assistantCall("computed-cd", "bash", { command: 'cd "$DIR" && cat a.md' }),
+		...entries(undefined, "computed-cd"),
 		...codemodeResult("cm-lossy", { complete: false, calls: [
 			{ id: "cm-lossy/1", name: "write", status: "ok", argumentsBytes: 9904 },
 			{ id: "cm-lossy/2", name: "read", status: "ok", arguments: { path: "/project/kept.ts" } },
@@ -290,7 +295,7 @@ test("Pi codemode records that lost file-tool evidence report incomplete attribu
 		] }),
 	], cwd);
 	assert.deepEqual(files.map((file) => [file.path, [...file.operations]]), [["/project/kept.ts", ["read"]]]);
-	assert.deepEqual(warn.mock.calls.map((call) => call.arguments[0].toolCallId), ["cm-lossy", "cm-unfinished", "cm-patch"]);
+	assert.equal(warn.mock.callCount(), 0);
 });
 
 test("truncated read output does not make a known read incomplete", () => {

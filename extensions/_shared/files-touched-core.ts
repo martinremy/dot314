@@ -37,14 +37,6 @@ type TrackedTouchRecord = {
 	timestamp: number;
 };
 
-const warnedIncompleteNestedKeys = new Set<string>();
-
-function warnIncompleteNestedFileActivity(key: string): void {
-	if (warnedIncompleteNestedKeys.has(key)) return;
-	warnedIncompleteNestedKeys.add(key);
-	console.warn({ component: "files-touched", code: "INCOMPLETE_NESTED_FILE_ACTIVITY", toolCallId: key });
-}
-
 type ParsedRootPrefixedPath = {
 	root: string;
 	relativePath: string;
@@ -1418,7 +1410,7 @@ export const parseCompletedFileActions: FileCallParser = (call) => completeTrack
 
 /** Collects nested file operations in message order using the same parser as direct calls. */
 export function collectNestedFileActions(messages: Parameters<typeof collectNested>[0], cwd?: string | null) {
-	return collectNested(messages, cwd, parseCompletedFileActions).actions;
+	return collectNested(messages, cwd, parseCompletedFileActions);
 }
 
 /** Enables live pi-codex-conversion attribution; repeated registration shares one recorder per event bus. */
@@ -1463,9 +1455,8 @@ export function collectFilesTouched(
 	const touches: TrackedTouchRecord[] = [];
 	const moves: FileMove[] = [];
 	const nested = collectNested(entries.flatMap((entry) => entry.type === "message" ? [entry.message] : []), cwd, parseCompletedFileActions);
-	for (const key of nested.incompleteKeys) warnIncompleteNestedFileActivity(key);
-	const nestedByMessage = new Map<object, typeof nested.actions>();
-	for (const item of nested.actions) {
+	const nestedByMessage = new Map<object, typeof nested>();
+	for (const item of nested) {
 		const items = nestedByMessage.get(item.message) ?? [];
 		items.push(item);
 		nestedByMessage.set(item.message, items);
@@ -1491,7 +1482,6 @@ export function collectFilesTouched(
 		if (trackedCall) {
 			const parsed = completeTrackedToolCall(trackedCall, { content: msg.content, details: msg.details, isError: msg.isError }, cwd);
 			actions.push(...parsed.actions);
-			if (parsed.incomplete) console.warn({ component: "files-touched", code: "INCOMPLETE_FILE_ACTIVITY", toolCallId });
 		}
 
 		for (const action of actions) {

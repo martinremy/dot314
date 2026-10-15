@@ -17,7 +17,7 @@ Borrowing heavily from [pasky/pi-amplike](https://github.com/pasky/pi-amplike) a
 
 ## Features
 
-The files-touched list covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the extension warns and includes the confirmed operations in the files-touched list. See [Files Touched coverage](../../packages/pi-files-touched/README.md#what-it-tracks) for supported commands and limits.
+The files-touched list covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the files-touched list includes only the confirmed operations. See [Files Touched coverage](../../packages/pi-files-touched/README.md#what-it-tracks) for supported commands and limits.
 
 - `/handover [purpose]`
   - purpose is optional (defaults to "continue from current milestone/state")

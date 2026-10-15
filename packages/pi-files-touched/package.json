@@ -1,6 +1,6 @@
 {
   "name": "pi-files-touched",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "File-activity tracking for Pi sessions across native, RepoPrompt, shell, Codex, and nested codemode and Notebook tools, with a /files-touched picker and reusable collector",
   "keywords": ["pi-package", "pi", "pi-coding-agent", "files", "tracking", "compaction"],
   "license": "MIT",

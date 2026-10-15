@@ -9,7 +9,7 @@ This extension can play three roles:
 
 The compaction and `/tree` features work without the coordinator. Coordinator integration is optional.
 
-Files-touched tracking covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the extension warns and includes the confirmed operations in the manifest. See [Files Touched coverage](https://github.com/w-winter/dot314/tree/main/packages/pi-files-touched#what-it-tracks) for supported commands and limits.
+Files-touched tracking covers supported tools run inside pi-codex-conversion Code and Notebook `exec` calls, calls completed through `wait`, and literal `rp-cli`/`rpce-cli` shell commands. Live nested tracking requires pi-codex-conversion 3.0.30 or newer. When file evidence is missing, the manifest lists only the confirmed operations. See [Files Touched coverage](https://github.com/w-winter/dot314/tree/main/packages/pi-files-touched#what-it-tracks) for supported commands and limits.
 
 > ⚠ **May conflict with other compaction extensions**: this extension hooks `session_before_compact` and returns a custom compaction result.  Any other extension that does the same is incompatible.  Having both active creates a race condition where the last handler to respond wins.  Enable only one.
 
