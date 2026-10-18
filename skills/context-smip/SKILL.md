@@ -42,6 +42,8 @@ Inspect the terminal receipt, compact coverage metadata and `handoff.md`, not th
 
 Verify the saved bundle with `verify --bundle <absolute-bundle-directory> --mode integrity`. Before reusing it as unchanged-source context, use `--mode current --config <absolute-host.json>`. Verify the requested comparison, mandatory files/documents, deleted paths and material context gaps against the manifest and Git inventory. Byte integrity is not proof that discovery found sufficient context. A conflict with the original assignment blocks dispatch.
 
+Inspect `manifest.unavailableRoots` and the matching handoff metadata. These records identify unavailable original roots and optional selected sources omitted from the packet. Publication stops if required source content is unavailable. An omitted body needed by the assignment blocks dispatch. Current verification requires the recorded unavailable-root states to remain unchanged; create a new context to include bodies from a restored root.
+
 ## Deliver and retain evidence
 
 Before dispatch, establish net recipient capacity for every primary and authorized fallback, accounting for system instructions, output, existing conversation, tools and processed attachment/dispatch overhead. Check the finished packet against those limits. Missing capacity evidence or insufficient capacity blocks delivery, not context assembly. Retain the packet and report the blocker; changing the assembly budget requires a user decision and a new build.
