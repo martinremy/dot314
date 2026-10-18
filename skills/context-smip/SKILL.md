@@ -30,7 +30,9 @@ Read the current schemas in `/Users/ww/smip/src/contracts/inventory.ts`, `/Users
 
 Use `initialSelection: { "codemapMode": "automatic", "sources": [] }` for an empty starting selection. Put mutable starting files or slices there; only `requiredSources` pins representations. Set `duplicateUserInstructionsAtTop` to false for the source default, or true when the assignment requests a second complete prompt block before the context sections.
 
-Set `copyPreset` explicitly to `standard`, `plan` or `codeReview`. Standard and Plan omit optional scout-selected patch bodies; Review includes nonblank selected patches. Selected MAP artifacts remain ordinary content, and caller-required `patches` remain complete in every preset. Supply `storedPrompts: []` unless the caller selected saved role blocks; otherwise provide their complete UUID, title and content catalog. The preset selects matching roles from that catalog. Do not invent role bodies or add a personal reviewer prompt. Leave `clarification` absent for this noninteractive CLI workflow.
+Set `copyPreset` explicitly to `standard`, `plan`, `diffFollowUp` or `codeReview`. Standard and Plan omit optional scout-selected patch bodies. Review and Diff Follow-Up include nonblank selected patches, or compute a scoped diff from selected full files and slices when no selected patch supplies text. Caller-required `patches` remain complete in every preset. Diff Follow-Up delivers Git context and the resulting prompt; source bodies, MAP bodies, the file tree and codemaps are excluded. Use another preset when the assignment needs source bodies or documents. Diff Follow-Up rejects required sources and documents rather than dropping them. Selected MAP artifacts are ordinary file content in the other presets.
+
+Supply `storedPrompts: []` unless the caller selected saved role blocks; otherwise provide their complete UUID, title and content catalog. The preset selects matching roles from that catalog. Diff Follow-Up includes no saved role. Do not invent role bodies or add a personal reviewer prompt. Leave `clarification` absent for this noninteractive CLI workflow.
 
 Run the CLI and save its terminal receipt and stderr to separate files under the run directory:
 
@@ -43,6 +45,8 @@ Inspect the terminal receipt, compact coverage metadata and `handoff.md`, not th
 Verify the saved bundle with `verify --bundle <absolute-bundle-directory> --mode integrity`. Before reusing it as unchanged-source context, use `--mode current --config <absolute-host.json>`. Verify the requested comparison, mandatory files/documents, deleted paths and material context gaps against the manifest and Git inventory. Byte integrity is not proof that discovery found sufficient context. A conflict with the original assignment blocks dispatch.
 
 Inspect `manifest.unavailableRoots`, `manifest.unavailableFiles` and the matching handoff metadata. These records identify unavailable roots, unreadable optional sources and pending optional manual codemaps omitted from the packet. Manual codemap I/O rows include their observed pending/unmapped disposition. Publication stops if required source content is unavailable; a pending required map keeps it blocked. An omitted body needed by the assignment blocks dispatch. Authorized Git evidence may include a deleted file's patch even when its ordinary body is omitted. Current verification rechecks I/O failures. For `codemapPending`, it checks the captured source and artifact key as historical readiness evidence. Create a new context to include recovered bodies.
+
+For Diff Follow-Up, `manifest.excludedSources` records selected paths and representations that explain the Git scope. Those entries do not supply source bodies to the recipient. Confirm that Git-only context is sufficient before dispatch.
 
 ## Deliver and retain evidence
 
