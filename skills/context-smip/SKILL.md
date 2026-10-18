@@ -42,7 +42,7 @@ Inspect the terminal receipt, compact coverage metadata and `handoff.md`, not th
 
 Verify the saved bundle with `verify --bundle <absolute-bundle-directory> --mode integrity`. Before reusing it as unchanged-source context, use `--mode current --config <absolute-host.json>`. Verify the requested comparison, mandatory files/documents, deleted paths and material context gaps against the manifest and Git inventory. Byte integrity is not proof that discovery found sufficient context. A conflict with the original assignment blocks dispatch.
 
-Inspect `manifest.unavailableRoots` and the matching handoff metadata. These records identify unavailable original roots and optional selected sources omitted from the packet. Publication stops if required source content is unavailable. An omitted body needed by the assignment blocks dispatch. Current verification requires the recorded unavailable-root states to remain unchanged; create a new context to include bodies from a restored root.
+Inspect `manifest.unavailableRoots`, `manifest.unavailableFiles` and the matching handoff metadata. These records identify unavailable original roots and unreadable optional full/sliced files omitted from the packet. Publication stops if required source content is unavailable. An omitted body needed by the assignment blocks dispatch. Authorized Git evidence may include a deleted file's patch even when its ordinary body is omitted. Current verification requires the recorded unavailable-root/file states to remain unchanged; create a new context to include recovered bodies.
 
 ## Deliver and retain evidence
 
