@@ -12,7 +12,7 @@ The coordinator gathers context with smip and delegates reasoning to the existin
 
 Confirm the task, absolute source roots/worktrees, Git state, required plan/documents, and review comparisons. Ask when a comparison is ambiguous. Capture changed, untracked and deleted paths appropriate to that comparison. Retain the original user requirements and approved boundary.
 
-Use `/Users/ww/smip/dist/cli/main.js` with Node. The configured host file is `/Users/ww/.config/smip/config.json`; use the operator's explicit path or `SMIP_CONFIG_PATH` when one is supplied. Pass the chosen absolute path with `--config`. If configuration, authentication, the native executable or search is unavailable, report the exact setup blocker. Do not change Pi settings, install packages, invent credentials, or substitute another context provider.
+Use `/Users/ww/smip/dist/cli/main.js` with Node. The configured host file is `/Users/ww/.config/smip/config.json`; use the operator's explicit path or `SMIP_CONFIG_PATH` when one is supplied. Pass the chosen absolute path with `--config`. If configuration, authentication or the native executable is unavailable, report the exact setup blocker. Do not change Pi settings, install packages, invent credentials, or substitute another context provider.
 
 Create a unique run directory under the primary repository's `prompt-exports/` directory with an existing output directory. Exclude this run's transient files from source discovery and review scope. Keep durable plans/reports in the repository's normal locations.
 
@@ -52,7 +52,7 @@ Verify the saved bundle with `verify --bundle <absolute-bundle-directory> --mode
 
 Inspect `manifest.unavailableRoots`, `manifest.unavailableFiles` and the matching handoff metadata. These records identify unavailable roots, unreadable optional sources and pending optional manual codemaps omitted from the packet. Manual codemap I/O rows include their observed pending/unmapped disposition. Publication stops if required source content is unavailable; a pending required map keeps it blocked. An omitted body needed by the assignment blocks dispatch. Authorized Git evidence may include a deleted file's patch even when its ordinary body is omitted. Current verification rechecks I/O failures. For `codemapPending`, it checks the captured source and artifact key as historical readiness evidence. Create a new context to include recovered bodies.
 
-For Diff Follow-Up, `manifest.excludedSources` records selected paths and representations that explain the Git scope. Those entries do not supply source bodies to the recipient. Confirm that Git-only context is sufficient before dispatch.
+For Diff Follow-Up, `manifest.manualPresentation.canonicalSources` records selected paths and representations that explain the Git scope. Those entries do not supply source bodies to the recipient. Confirm that Git-only context is sufficient before dispatch.
 
 ## Deliver and retain evidence
 
