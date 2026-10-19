@@ -38,7 +38,7 @@ function tokenizeInvocationArgParts(argsString: string): InvocationToken[] {
       continue;
     }
 
-    if (character === " " || character === "\t") {
+    if (/\s/.test(character)) {
       if (current) {
         args.push({ value: current, quoted: tokenQuoted });
         current = "";

@@ -54,7 +54,7 @@ Given the invocation above, the template receives:
 | `lang` | `"python"` | Normalized top-level option |
 | `foo_bar` | `"baz"` | Hyphens become underscores in top-level variables |
 
-Argument syntax supports `--flag`, `--key value`, and `--key=value`. Bare tokens become positional arguments; `--` makes all following tokens positional. Reserved names (`args`, `all_args`, `skill_name`, `named`) are rejected.
+Argument syntax supports `--flag`, `--key value`, and `--key=value`. Whitespace, including newlines, separates unquoted arguments. Bare tokens become positional arguments; `--` makes all following tokens positional. Reserved names (`args`, `all_args`, `skill_name`, `named`) are rejected.
 
 `all_args` preserves quote characters, option spelling, equals-versus-space syntax, and the `--` sentinel after trimming outer whitespace. Grouping quotes are removed in parsed `args`, `named`, and normalized variables. The same raw tail is appended after the closing `</skill>` tag, allowing arguments to influence template rendering while remaining visible to the agent.
 

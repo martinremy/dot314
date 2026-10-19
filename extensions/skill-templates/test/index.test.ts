@@ -89,6 +89,31 @@ test("input continues to core handling when no matching template skill exists", 
   harness.cleanup();
 });
 
+test("multiline prompts after -- render through skill input and alias commands", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+  const skillDir = join(harness.cwd, ".pi", "skills", "review");
+  const skillFile = join(skillDir, "SKILL.template.md");
+  writeTextFile(skillFile, "---\ndescription: review\n---\nTicket: {{ args | join(' ') }}");
+  const rawArgs = "--\n\nmy prompt went beneath via newline --literal";
+  const expectedText = [
+    `<skill name="review" location="${canonicalizePath(skillFile)}">`,
+    `References are relative to ${canonicalizePath(skillDir)}.`,
+    "",
+    "Ticket: my prompt went beneath via newline --literal",
+    "</skill>",
+    "",
+    rawArgs,
+  ].join("\n");
+
+  await harness.emit("session_start");
+  const result = await harness.emitInput({ text: `/skill:review ${rawArgs}` });
+  assert.deepEqual(result, { action: "transform", text: expectedText, images: undefined });
+
+  await harness.invokeCommand("skill-template:review", rawArgs);
+  assert.deepEqual(harness.sentUserMessages, [{ content: expectedText, options: undefined }]);
+});
+
 test("input handles matching template render errors without falling back", async () => {
   const harness = createHarness();
   const skillDir = join(harness.cwd, ".pi", "skills", "review");

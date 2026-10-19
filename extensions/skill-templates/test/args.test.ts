@@ -36,6 +36,15 @@ test("parseInvocationArgs stops option parsing after sentinel", () => {
   assert.deepEqual(parsed.named, { lang: "python" });
 });
 
+test("parseInvocationArgs separates options on newlines and preserves quoted newlines", () => {
+  const raw = '--lang python\r\n--note "first\nsecond"\n--\n\nreport --not-a-flag';
+  const parsed = parseInvocationArgs(raw);
+
+  assert.equal(parsed.raw, raw);
+  assert.deepEqual(parsed.args, ["report", "--not-a-flag"]);
+  assert.deepEqual(parsed.named, { lang: "python", note: "first\nsecond" });
+});
+
 test("parseInvocationArgs allows empty values with equals syntax", () => {
   const parsed = parseInvocationArgs("--note=");
 
