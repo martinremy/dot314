@@ -1538,13 +1538,16 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 		if (Boolean(next) && Boolean(live) && Boolean(live.inherited) && next.sessionId === live.sessionId) return;
 		const restartPending = Boolean(abortCtx.restartRequest);
 		let replaced = next;
+		if (Boolean(next) && Boolean(abortCtx.transcriptCheckpoint) && abortCtx.transcriptCheckpoint.sessionId === next.sessionId) {
+			replaced = { ...next, transcriptLeaf: abortCtx.transcriptCheckpoint.uuid };
+		}
 		// A mid-query user message the ledger could not identify is owned by
 		// the rebuild, as is history rewritten under Claude mid-query; a
 		// completed query's fresh record must not erase either mark.
 		if (Boolean(next) && (abortCtx.piHistoryReplaced || restartPending || abortCtx.userInputNeedsRebuild || abortCtx.priorHistoryRewritten)) {
 			const rebuildReason: RebuildMark = (next?.needsRebuild && next.rebuildReason) ||
 				(abortCtx.piHistoryReplaced || restartPending ? "history-replaced" : abortCtx.userInputNeedsRebuild ? "user-unresolved" : "history-rewritten");
-			replaced = { ...next, needsRebuild: true, rebuildReason };
+			replaced = { ...replaced, needsRebuild: true, rebuildReason };
 			if (restartPending) replaced.forceRotate = true;
 		}
 		if (replaced && replaced.historyDigest === undefined) {

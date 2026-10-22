@@ -4,6 +4,7 @@
 
 import { type Model } from "@earendil-works/pi-ai";
 import { type query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import {
 	classifyClaudeFailure,
 	rateLimitResetFromInfo,
@@ -27,6 +28,13 @@ import { activeStreamIdleWatchdogs } from "./stream-idle-watchdog.ts";
 import { logClaudeCodeVersion } from "./versions.ts";
 
 const ABANDONED: unique symbol = Symbol("sdk-query-abandoned");
+
+const assistantCheckpointSchema = z.object({
+	session_id: z.string().min(1),
+	uuid: z.string().min(1),
+	parent_tool_use_id: z.null(),
+	message: z.object({ model: z.string().refine(model => model !== "<synthetic>") }),
+});
 
 /** Silence an `api_retry` notice announces: the backoff before the retry,
  *  plus the retry's own wait for response headers after a no-response
@@ -161,6 +169,7 @@ export async function consumeQuery(
 	// rateLimitInfo, and double-counts the router cooldown.
 	attemptFailureBox?: { failure?: ClaudeAttemptFailure },
 ): Promise<ConsumeQueryResult> {
+	queryCtx.transcriptCheckpoint = null;
 	let capturedSessionId: string | undefined;
 	let failure: ClaudeAttemptFailure | undefined;
 	let accountProbe: Promise<void> | undefined;
@@ -231,6 +240,8 @@ export async function consumeQuery(
 					if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: notice || String(sdkError) });
 					break;
 				}
+				const checkpoint = assistantCheckpointSchema.safeParse(message);
+				if (checkpoint.success) queryCtx.transcriptCheckpoint = { sessionId: checkpoint.data.session_id, uuid: checkpoint.data.uuid };
 				if (message.message.model !== "<synthetic>") queryCtx.apiResponded = true;
 				if (!streamLive && !queryCtx.turnSawToolCall) break;
 				processAssistantMessage(message, model, customToolNameToPi, queryCtx);

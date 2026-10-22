@@ -2185,6 +2185,8 @@ var QueryContext = class {
    *  Undefined until it arrives; the audit trail omits the field rather than
    *  guessing. */
   childSessionId;
+  /** Latest top-level assistant record observed in the current SDK query. */
+  transcriptCheckpoint = null;
   /** Anthropic content-block indexes of the current assistant message that carry
    *  a child-executed tool_use. Scoped to one message: cleared at message_start,
    *  and an index is released as soon as another block starts there. */
@@ -3067,7 +3069,9 @@ var REBUILD_MARKS = [
   "orphan-unverified",
   "host-resumed",
   "inherited",
-  "failed-reply-retry"
+  "failed-reply-retry",
+  "transcript-written",
+  "transcript-unverified"
 ];
 var SHARED_SESSION_LANES_SYMBOL = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.shared-session-lanes.v1");
 function sharedSessionLaneStore() {
@@ -4330,11 +4334,11 @@ var abandonments = /* @__PURE__ */ new WeakMap();
 function abandonment(sdkQuery2) {
   let entry = abandonments.get(sdkQuery2);
   if (!entry) {
-    let resolve4;
+    let resolve5;
     const promise2 = new Promise((done) => {
-      resolve4 = done;
+      resolve5 = done;
     });
-    entry = { promise: promise2, resolve: resolve4, armed: false };
+    entry = { promise: promise2, resolve: resolve5, armed: false };
     abandonments.set(sdkQuery2, entry);
   }
   return entry;
@@ -46610,8 +46614,8 @@ function convertBaseSchema(schema2, ctx2) {
           break;
         }
         const objectSchema2 = z.object(shape).passthrough();
-        const recordSchema = z.looseRecord(keySchema, valueSchema);
-        zodSchema = z.intersection(objectSchema2, recordSchema);
+        const recordSchema2 = z.looseRecord(keySchema, valueSchema);
+        zodSchema = z.intersection(objectSchema2, recordSchema2);
         break;
       }
       if (schema2.patternProperties) {
@@ -47029,14 +47033,14 @@ var ServedToolServer = class {
     if (!changed && !visibilityChanged) return null;
     if (visibilityChanged) this.config.instance.sendToolListChanged();
     if (!this.config.instance.isConnected()) return Promise.resolve("not-connected");
-    return new Promise((resolve4) => {
+    return new Promise((resolve5) => {
       const timer = setTimeout(() => {
         this.relistWaiters = this.relistWaiters.filter((waiter) => waiter !== release);
-        resolve4("timeout");
+        resolve5("timeout");
       }, timeoutMs);
       const release = () => {
         clearTimeout(timer);
-        resolve4("relisted");
+        resolve5("relisted");
       };
       this.relistWaiters.push(release);
     });
@@ -48012,8 +48016,8 @@ function readSession(jsonlPath, projectPath) {
 
 // src/session-persistence.ts
 import { createHash as createHash5 } from "crypto";
-import { closeSync as closeSync4, mkdirSync as mkdirSync6, openSync as openSync4, realpathSync as realpathSync6, rmSync as rmSync3, statSync as statSync5, writeFileSync as writeFileSync4 } from "fs";
-import { dirname as dirname8, resolve as pathResolve } from "path";
+import { closeSync as closeSync4, mkdirSync as mkdirSync6, openSync as openSync4, realpathSync as realpathSync7, rmSync as rmSync3, statSync as statSync5, writeFileSync as writeFileSync4 } from "fs";
+import { dirname as dirname8 } from "path";
 
 // src/native-fork.ts
 import { readFileSync as readFileSync8 } from "fs";
@@ -48764,9 +48768,103 @@ function verifyWrittenSession(jsonlPath, expectedSessionId, expectedRecordCount)
   return warnings;
 }
 
+// src/transcript-ownership.ts
+import { readFileSync as readFileSync9, realpathSync as realpathSync6 } from "fs";
+import { resolve as resolve4 } from "path";
+function canonicalize(path) {
+  if (!path) return void 0;
+  try {
+    return realpathSync6.native(path);
+  } catch {
+    return resolve4(path);
+  }
+}
+function shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, currentCwd) {
+  if (!persisted.piSessionId) return "missing piSessionId";
+  if (currentPiSessionId && persisted.piSessionId !== currentPiSessionId) {
+    return `piSessionId mismatch (persisted=${persisted.piSessionId} current=${currentPiSessionId})`;
+  }
+  if (currentCwd && canonicalize(persisted.cwd) !== canonicalize(currentCwd)) {
+    return `cwd mismatch (persisted=${persisted.cwd} current=${currentCwd})`;
+  }
+  return void 0;
+}
+function assessRestoredTranscriptOwnership(identity) {
+  const persisted = { piSessionId: identity.storedPiSessionId, cwd: identity.storedCwd };
+  const rejection = shouldRestorePersistedBridgeEntry(persisted, identity.currentPiSessionId, void 0);
+  if (rejection) {
+    if (identity.source === "parent" && identity.storedPiSessionId && identity.currentPiSessionId) return { kind: "copy" };
+    return { kind: "reject", reason: rejection };
+  }
+  if (!identity.currentPiSessionId || !identity.storedPiSessionFile || !identity.currentPiSessionFile || canonicalize(identity.storedPiSessionFile) !== canonicalize(identity.currentPiSessionFile)) return { kind: "copy" };
+  const cwdRejection = shouldRestorePersistedBridgeEntry(persisted, identity.currentPiSessionId, identity.currentCwd);
+  return cwdRejection ? { kind: "reject", reason: cwdRejection } : { kind: "own" };
+}
+var blockSchema = external_exports.discriminatedUnion("type", [
+  external_exports.object({ type: external_exports.literal("text"), text: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("image"), source: external_exports.object({ type: external_exports.string() }) }),
+  external_exports.object({ type: external_exports.literal("tool_result"), tool_use_id: external_exports.string(), content: external_exports.unknown() }),
+  external_exports.object({ type: external_exports.literal("tool_use"), id: external_exports.string(), name: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("thinking"), thinking: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("redacted_thinking"), data: external_exports.string() })
+]);
+var messageSchema = external_exports.object({ model: external_exports.string().optional(), content: external_exports.union([external_exports.string(), external_exports.array(blockSchema)]) });
+var recordSchema = external_exports.object({
+  type: external_exports.string(),
+  uuid: external_exports.string().optional(),
+  isSidechain: external_exports.boolean().optional(),
+  isMeta: external_exports.boolean().optional(),
+  message: messageSchema.optional(),
+  attachment: external_exports.object({ type: external_exports.string() }).optional()
+}).refine((record2) => record2.type !== "user" && record2.type !== "assistant" || record2.message !== void 0);
+var INTERRUPTION_MARKERS = /* @__PURE__ */ new Set(["[Request interrupted by user]", "[Request interrupted by user for tool use]"]);
+function isConversationInput(record2) {
+  if (record2.isSidechain === true || record2.isMeta === true) return false;
+  if (record2.type === "attachment") return Boolean(record2.attachment) && record2.attachment.type === "queued_command";
+  if (record2.type === "assistant") return record2.message.model !== "<synthetic>";
+  if (record2.type !== "user") return false;
+  const content = record2.message.content;
+  if (!Array.isArray(content)) return !INTERRUPTION_MARKERS.has(content);
+  if (content.length === 1 && content[0].type === "text" && INTERRUPTION_MARKERS.has(content[0].text)) return false;
+  return content.some((block) => block.type !== "tool_result");
+}
+function inspectTranscriptAfterLeaf(transcriptPath, leafUuid) {
+  let text;
+  try {
+    text = readFileSync9(transcriptPath, "utf8");
+  } catch {
+    return { kind: "unavailable", reason: "unreadable" };
+  }
+  if (text.length > 0 && !text.endsWith("\n")) return { kind: "unavailable", reason: "incomplete" };
+  let found = false;
+  let appended = false;
+  let start = 0;
+  while (start < text.length) {
+    const end = text.indexOf("\n", start);
+    const line = text.slice(start, end).trim();
+    start = end + 1;
+    if (!line) continue;
+    let raw;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      return { kind: "unavailable", reason: "malformed" };
+    }
+    const parsed = recordSchema.safeParse(raw);
+    if (!parsed.success) return { kind: "unavailable", reason: "malformed" };
+    appended = appended || found && isConversationInput(parsed.data);
+    found = found || parsed.data.uuid === leafUuid;
+  }
+  if (!found) return { kind: "changed", reason: "leaf-missing" };
+  return appended ? { kind: "changed", reason: "conversation-appended" } : { kind: "unchanged" };
+}
+
 // src/session-persistence.ts
 var BRIDGE_SESSION_CUSTOM_TYPE = "claude-bridge-session";
 var persistedMetadataSchema = external_exports.object({
+  piSessionId: external_exports.string().min(1).optional(),
+  piSessionFile: external_exports.string().min(1).optional(),
+  transcriptLeaf: external_exports.string().min(1).optional(),
   conversationFingerprint: external_exports.string().optional(),
   historyDigest: external_exports.string().optional(),
   trailingAssistantDigest: external_exports.string().optional(),
@@ -48858,33 +48956,29 @@ function claudeSessionExists(sessionId, cwd, claudeDir) {
     return false;
   }
 }
-function canonicalize(p) {
-  if (!p) return void 0;
-  try {
-    return realpathSync6.native(p);
-  } catch {
-    return pathResolve(p);
-  }
-}
-function shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, currentCwd) {
-  if (!persisted.piSessionId) return "missing piSessionId";
-  if (currentPiSessionId && persisted.piSessionId !== currentPiSessionId) {
-    return `piSessionId mismatch (persisted=${persisted.piSessionId} current=${currentPiSessionId})`;
-  }
-  if (currentCwd && canonicalize(persisted.cwd) !== canonicalize(currentCwd)) {
-    return `cwd mismatch (persisted=${persisted.cwd} current=${currentCwd})`;
-  }
-  return void 0;
-}
 function restoreSharedSessionFromPi(ctx2, source = "own") {
   const persisted = latestPersistedBridgeSession(ctx2.sessionManager);
   if (!persisted) return;
-  const currentPiSessionId = typeof ctx2.sessionManager?.getSessionId === "function" ? ctx2.sessionManager.getSessionId() : void 0;
-  const currentCwd = typeof ctx2.sessionManager?.getCwd === "function" ? ctx2.sessionManager.getCwd() : ctx2.cwd;
-  const rejection = shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, currentCwd);
-  const inherited = source === "parent" && Boolean(currentPiSessionId) && Boolean(persisted.piSessionId) && persisted.piSessionId !== currentPiSessionId;
-  if (rejection && !inherited) {
-    debug(`restoreSharedSession: ${rejection} \u2014 forcing rebuild`);
+  const metadata = persistedMetadataSchema.safeParse(persisted);
+  if (!metadata.success) {
+    debug("restoreSharedSession: invalid session metadata; forcing rebuild");
+    return;
+  }
+  const sessionManager = ctx2.sessionManager;
+  const currentPiSessionId = Boolean(sessionManager.getSessionId) ? sessionManager.getSessionId() : void 0;
+  const currentPiSessionFile = Boolean(sessionManager.getSessionFile) ? sessionManager.getSessionFile() : void 0;
+  const currentCwd = Boolean(sessionManager.getCwd) ? sessionManager.getCwd() : ctx2.cwd;
+  const ownership = assessRestoredTranscriptOwnership({
+    storedPiSessionId: metadata.data.piSessionId,
+    currentPiSessionId,
+    storedPiSessionFile: metadata.data.piSessionFile,
+    currentPiSessionFile,
+    storedCwd: persisted.cwd,
+    currentCwd,
+    source
+  });
+  if (ownership.kind === "reject") {
+    debug(`restoreSharedSession: ${ownership.reason}; forcing rebuild`);
     return;
   }
   const built = readBuiltSessionContext(ctx2.sessionManager);
@@ -48895,24 +48989,20 @@ function restoreSharedSessionFromPi(ctx2, source = "own") {
     debug(`restoreSharedSession: fingerprint mismatch for ${persisted.sessionId.slice(0, 8)}`);
     return;
   }
-  const metadata = persistedMetadataSchema.safeParse(persisted);
-  if (!metadata.success) {
-    debug("restoreSharedSession: invalid session metadata; forcing rebuild");
-    return;
-  }
-  publishRestoredSession(persisted, cursor, metadata.data, inherited ? "parent" : "own");
+  publishRestoredSession(persisted, cursor, metadata.data, ownership.kind);
 }
 function publishRestoredSession(persisted, cursor, metadata, ownership) {
+  const { piSessionId: _piId, piSessionFile: _piFile, ...sessionMetadata } = metadata;
   const accountProfileId = metadata.accountProfileId;
   const claudeConfigDir = accountProfileId ? claudeDirForProfile(resolveClaudeAccountRouter()?.resolveProfile?.(accountProfileId) ?? {}) : void 0;
-  if (ownership === "parent") {
-    const parent = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd, needsRebuild: true, rebuildReason: "inherited", inherited: true };
+  if (ownership === "copy") {
+    const parent = { ...sessionMetadata, sessionId: persisted.sessionId, cursor, cwd: persisted.cwd, needsRebuild: true, rebuildReason: "inherited", inherited: true };
     if (accountProfileId) {
       parent.accountProfileId = accountProfileId;
       parent.claudeConfigDir = claudeConfigDir;
     }
     setSharedSession(parent);
-    debug("restoreSharedSession: copying a parent transcript on the next rebuild", persisted.sessionId.slice(0, 8));
+    debug("restoreSharedSession: copying a read-only transcript on the next rebuild", persisted.sessionId.slice(0, 8));
     return;
   }
   if (!claudeSessionExists(persisted.sessionId, persisted.cwd, claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR)) {
@@ -48920,7 +49010,7 @@ function publishRestoredSession(persisted, cursor, metadata, ownership) {
     return;
   }
   setSharedSession({
-    ...metadata,
+    ...sessionMetadata,
     sessionId: persisted.sessionId,
     cursor,
     cwd: persisted.cwd,
@@ -48951,6 +49041,8 @@ function schedulePersistSharedSession(ctxLike) {
   if (!extensionApi2 || !sharedSession || !ctxLike?.sessionManager) return;
   if (Boolean(sharedSession.inherited)) return;
   const sessionManager = ctxLike.sessionManager;
+  const piSessionId = Boolean(sessionManager.getSessionId) ? sessionManager.getSessionId() : void 0;
+  const piSessionFile = Boolean(sessionManager.getSessionFile) ? sessionManager.getSessionFile() : void 0;
   const { claudeConfigDir: _omitted, ...snapshot } = sharedSession;
   const timers = scheduledPersistenceTimers();
   const superseded = timers.get(sessionManager);
@@ -48966,9 +49058,10 @@ function schedulePersistSharedSession(ctxLike) {
         ...snapshot,
         cursor,
         fingerprint: fingerprintMessages(built.messages.slice(0, cursor)),
-        piSessionId: typeof sessionManager?.getSessionId === "function" ? sessionManager.getSessionId() : void 0,
+        piSessionId,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       };
+      if (piSessionFile) data.piSessionFile = piSessionFile;
       extensionApi2?.appendEntry(BRIDGE_SESSION_CUSTOM_TYPE, data);
       debug(`persistSharedSession: saved ${data.sessionId.slice(0, 8)}, cursor=${data.cursor}`);
     } catch (error51) {
@@ -49070,7 +49163,7 @@ For details, ${diagGuidance()}.`,
 }
 function safeRealpath(p) {
   try {
-    return realpathSync6(p);
+    return realpathSync7(p);
   } catch (e) {
     return `<failed: ${e.message}>`;
   }
@@ -49092,7 +49185,7 @@ function debugSessionPaths(label, cwd, jsonlPath, claudeDir) {
   debug(`${label}: selected.CLAUDE_CONFIG_DIR=${claudeDir ?? "(unset)"} HOME=${process.env.HOME ?? "(unset)"}`);
 }
 function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account, options = {}) {
-  const sharedSession = getSharedSession();
+  let sharedSession = getSharedSession();
   const promptStart = promptRunStart(messages);
   const priorMessages = messages.slice(0, promptStart);
   const accountProfileId = account?.accountProfileId;
@@ -49102,7 +49195,6 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
     sharedSession && sharedSession.accountProfileId === accountProfileId && sharedSession.claudeConfigDir === scopeConfigDir
   );
   const incomingFingerprint = conversationFingerprint(messages);
-  const mark = sharedSession?.needsRebuild ? sharedSession.rebuildReason ?? "unrecorded" : void 0;
   if (sharedSession && incomingFingerprint && isForeignConversation(sharedSession, messages)) {
     debug(
       `Case 6 foreign-conversation: fingerprint ${incomingFingerprint.slice(0, 8)} != record ${sharedSession.conversationFingerprint?.slice(0, 8)} (cursor=${sharedSession.cursor}, priors=${priorMessages.length}) \u2014 clean one-shot, record untouched`
@@ -49110,6 +49202,15 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId, account,
     debug(`syncResult: path=foreign-one-shot cause=foreign-conversation`);
     return { sessionId: null, promptStart: lastConversationIndex(messages), foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
   }
+  if (Boolean(sharedSession) && sameAccount && sharedSession.transcriptLeaf && !Boolean(sharedSession.inherited) && !sharedSession.forceRotate) {
+    const inspection = inspectTranscriptAfterLeaf(getSessionPath(sharedSession.sessionId, sharedSession.cwd, claudeDir), sharedSession.transcriptLeaf);
+    debug(`transcript inspection: session=${sharedSession.sessionId.slice(0, 8)} outcome=${inspection.kind}${inspection.kind !== "unchanged" ? ` reason=${inspection.reason}` : ""}`);
+    if (inspection.kind !== "unchanged") {
+      sharedSession = { ...sharedSession, inherited: true, needsRebuild: true, rebuildReason: inspection.kind === "changed" ? "transcript-written" : "transcript-unverified" };
+      setSharedSession(sharedSession);
+    }
+  }
+  const mark = Boolean(sharedSession) && sharedSession.needsRebuild ? sharedSession.rebuildReason ?? "unrecorded" : void 0;
   let digestCause;
   if (sharedSession && sameAccount && !sharedSession.needsRebuild) {
     const batch = planIncrementalPromptBatch(messages, sharedSession.cursor);
@@ -49418,8 +49519,8 @@ async function discoverClaudeModels(cwd, account, signal) {
   if (executable) preflightClaudeExecutable(executable, cwd);
   const controller = new AbortController();
   let closeInput;
-  const inputClosed = new Promise((resolve4) => {
-    closeInput = resolve4;
+  const inputClosed = new Promise((resolve5) => {
+    closeInput = resolve5;
   });
   async function* input() {
     await inputClosed;
@@ -49528,6 +49629,12 @@ function registerBridgeCommands(pi2) {
 
 // src/consume-query.ts
 var ABANDONED = /* @__PURE__ */ Symbol("sdk-query-abandoned");
+var assistantCheckpointSchema = external_exports.object({
+  session_id: external_exports.string().min(1),
+  uuid: external_exports.string().min(1),
+  parent_tool_use_id: external_exports.null(),
+  message: external_exports.object({ model: external_exports.string().refine((model) => model !== "<synthetic>") })
+});
 function announcedQuietMs(message) {
   if (message.type !== "system" || message.subtype !== "api_retry") return 0;
   return (Number(message.retry_delay_ms) || 0) + (Number(message.no_response?.retry_wait_ms) || 0);
@@ -49592,6 +49699,7 @@ function noteAbandonedToolCalls(message, queryCtx) {
   }
 }
 async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, bridgeConfig, wasAborted, account, router, attemptFailureBox) {
+  queryCtx.transcriptCheckpoint = null;
   let capturedSessionId;
   let failure;
   let accountProbe;
@@ -49642,6 +49750,8 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
           if (!failure) holdFailure({ kind: classifyClaudeFailure(sdkError), message: notice || String(sdkError) });
           break;
         }
+        const checkpoint = assistantCheckpointSchema.safeParse(message);
+        if (checkpoint.success) queryCtx.transcriptCheckpoint = { sessionId: checkpoint.data.session_id, uuid: checkpoint.data.uuid };
         if (message.message.model !== "<synthetic>") queryCtx.apiResponded = true;
         if (!streamLive && !queryCtx.turnSawToolCall) break;
         processAssistantMessage(message, model, customToolNameToPi, queryCtx);
@@ -49777,7 +49887,7 @@ async function consumeQuery(sdkQuery2, queryCtx, customToolNameToPi, model, brid
   if (accountProbe) {
     await Promise.race([
       accountProbe,
-      new Promise((resolve4) => setTimeout(resolve4, 1500))
+      new Promise((resolve5) => setTimeout(resolve5, 1500))
     ]);
   }
   debug(`consumeQuery: for-await loop exited, wasAborted=${wasAborted()}, capturedSessionId=${capturedSessionId?.slice(0, 8) ?? "none"}, failure=${failure?.kind ?? "none"}`);
@@ -50032,7 +50142,7 @@ function mcpToolHandler(tool, queryCtx) {
     const onCancel = () => {
       withdrawCancelledToolCall(queryCtx, toolCallId);
     };
-    return queryCtx.trackAnswer(toolCallId, new Promise((resolve4) => {
+    return queryCtx.trackAnswer(toolCallId, new Promise((resolve5) => {
       queryCtx.pendingToolCalls.set(toolCallId, {
         toolName: tool.name,
         args: mappedArgs,
@@ -50040,7 +50150,7 @@ function mcpToolHandler(tool, queryCtx) {
         resolve: (result) => {
           signal?.removeEventListener("abort", onCancel);
           queryCtx.markToolResultResolved(toolCallId);
-          resolve4(result);
+          resolve5(result);
         }
       });
       if (signal?.aborted) onCancel();
@@ -50796,9 +50906,12 @@ function startFreshQuery(fresh, syncResult) {
     if (Boolean(next) && Boolean(live) && Boolean(live.inherited) && next.sessionId === live.sessionId) return;
     const restartPending = Boolean(abortCtx.restartRequest);
     let replaced = next;
+    if (Boolean(next) && Boolean(abortCtx.transcriptCheckpoint) && abortCtx.transcriptCheckpoint.sessionId === next.sessionId) {
+      replaced = { ...next, transcriptLeaf: abortCtx.transcriptCheckpoint.uuid };
+    }
     if (Boolean(next) && (abortCtx.piHistoryReplaced || restartPending || abortCtx.userInputNeedsRebuild || abortCtx.priorHistoryRewritten)) {
       const rebuildReason = next?.needsRebuild && next.rebuildReason || (abortCtx.piHistoryReplaced || restartPending ? "history-replaced" : abortCtx.userInputNeedsRebuild ? "user-unresolved" : "history-rewritten");
-      replaced = { ...next, needsRebuild: true, rebuildReason };
+      replaced = { ...replaced, needsRebuild: true, rebuildReason };
       if (restartPending) replaced.forceRotate = true;
     }
     if (replaced && replaced.historyDigest === void 0) {

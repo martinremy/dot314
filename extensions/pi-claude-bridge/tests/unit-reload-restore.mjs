@@ -6,7 +6,7 @@
 import "./lib/debug-env.mjs";
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -171,8 +171,11 @@ describe("/reload keeps the warm Claude session", () => {
 		installFakeClaudeCode(resumes, waiting);
 		const entries = [];
 		let history = [{ role: "system", content: "test system prompt", toolsAdded: [ECHO], timestamp: 0 }];
+		const piFile = join(agentDir, "pi.jsonl");
+		writeFileSync(piFile, "");
 		const sessionManager = {
 			getSessionId: () => PI_SESSION,
+			getSessionFile: () => piFile,
 			getCwd: () => process.cwd(),
 			getEntries: () => entries,
 			buildSessionContext: () => ({ messages: history }),

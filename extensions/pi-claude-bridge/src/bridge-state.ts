@@ -12,6 +12,7 @@ import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairin
 export const REBUILD_MARKS = [
 	"abort", "idle-timeout", "usage-credits", "history-replaced", "history-rewritten", "user-unresolved",
 	"dropped-steers", "steering-write", "steering-failed", "tool-results-outstanding", "orphan-unverified", "host-resumed", "inherited", "failed-reply-retry",
+	"transcript-written", "transcript-unverified",
 ] as const;
 export type RebuildMark = typeof REBUILD_MARKS[number];
 
@@ -19,6 +20,8 @@ export interface SessionState {
 	sessionId: string;
 	cursor: number;
 	cwd: string;
+	/** Native record UUID of the latest observed assistant reply for this session. */
+	transcriptLeaf?: string;
 	// Claude Code session files and resume IDs are credential-profile scoped.
 	// Missing values mean the legacy/default Claude profile (process env rules).
 	// `claudeConfigDir` is the RESOLVED dir (see claudeDirForProfile) and is

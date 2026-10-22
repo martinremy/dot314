@@ -11,11 +11,12 @@
  */
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { conversationFingerprint, syncSharedSession } from "../src/session-persistence.js";
-import { getSessionPath, parseJsonlFile } from "cc-session-io";
+import { createSession, getSessionPath, parseJsonlFile } from "cc-session-io";
 import { historyDigest } from "../src/history-digest.js";
 import { __testGetBridgeIntegrityState, setSharedSession } from "../src/bridge-state.js";
 import { findUnpairedToolUses } from "../src/tool-pairing-audit.js";
@@ -519,6 +520,103 @@ describe("syncSharedSession REBUILD after replies that failed or were cut off by
 			} finally {
 				rmSync(cwd, { recursive: true, force: true });
 			}
+		});
+	});
+});
+
+describe("native transcript append ownership", () => {
+	async function fixture(run) {
+		const root = mkdtempSync(join(tmpdir(), "bridge-append-"));
+		const cwd = join(root, "project");
+		const claudeDir = join(root, "claude");
+		const previous = process.env.CLAUDE_CONFIG_DIR;
+		process.env.CLAUDE_CONFIG_DIR = claudeDir;
+		mkdirSync(cwd);
+		try {
+			const native = createSession({ projectPath: cwd, claudeDir });
+			native.addUserMessage("first");
+			native.addAssistantMessage([{ type: "text", text: "answer" }], { model: "claude-haiku-4-5" });
+			native.save();
+			const leaf = native.records.at(-1).uuid;
+			const messages = [user("first"), assistantText("answer"), user("next")];
+			const record = { sessionId: native.sessionId, cursor: 2, cwd, transcriptLeaf: leaf, historyDigest: historyDigest(messages.slice(0, 2)) };
+			setSharedSession(record);
+			await run({ native, leaf, messages, record, cwd, claudeDir });
+		} finally {
+			if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+			else process.env.CLAUDE_CONFIG_DIR = previous;
+			execFileSync("trash", [root]);
+		}
+	}
+	const external = [
+		["assistant reply", { type: "assistant", message: { model: "claude-haiku-4-5", content: [{ type: "text", text: "external reply" }] } }],
+		["text prompt", { type: "user", message: { content: "external prompt" } }],
+		["image-only prompt", { type: "user", message: { content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" } }] } }],
+		["queued command", { type: "attachment", attachment: { type: "queued_command", content: "external command" } }],
+	];
+	for (const [name, entry] of external) {
+		for (const marked of [false, true]) {
+			it(`copies a transcript with an external ${name}${marked ? " even when already marked for rebuild" : ""}`, async () => {
+				await fixture(async ({ native, messages, record, cwd, claudeDir }) => {
+					appendFileSync(native.jsonlPath, JSON.stringify({ ...entry, uuid: "external-record", sessionId: native.sessionId }) + "\n");
+					if (marked) setSharedSession({ ...record, needsRebuild: true, rebuildReason: "history-replaced" });
+					const source = readFileSync(native.jsonlPath);
+					const result = await syncSharedSession(messages, cwd);
+					assert.notEqual(result.sessionId, native.sessionId);
+					assert.equal(result.sync.mark, "transcript-written");
+					assert.deepEqual(readFileSync(native.jsonlPath), source);
+					const copied = readFileSync(getSessionPath(result.sessionId, cwd, claudeDir), "utf8");
+					assert.ok(!copied.includes("external-record"), "the copy excludes the external turn");
+					assert.ok(copied.includes("answer"));
+				});
+			});
+		}
+	}
+
+	it("reuses after metadata, tool results, synthetic replies and exact interruption markers", async () => {
+		await fixture(async ({ native, messages, cwd }) => {
+			const entries = [
+				{ type: "system", subtype: "turn_duration" },
+				{ type: "user", isMeta: true, message: { content: "meta" } },
+				{ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "No response requested." }] } },
+				{ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call", content: "output" }] } },
+				...["[Request interrupted by user]", "[Request interrupted by user for tool use]"].map(text => ({ type: "user", message: { content: [{ type: "text", text }] } })),
+			];
+			appendFileSync(native.jsonlPath, entries.map(JSON.stringify).join("\n") + "\n");
+			const result = await syncSharedSession(messages, cwd);
+			assert.equal(result.sessionId, native.sessionId);
+			assert.equal(result.sync.path, "reuse");
+		});
+	});
+
+	for (const [name, alter, inspection] of [
+		["missing leaf", ({ record }) => setSharedSession({ ...record, transcriptLeaf: "absent" }), { kind: "changed", reason: "leaf-missing" }],
+		["malformed record", ({ native }) => appendFileSync(native.jsonlPath, '{}\n'), { kind: "unavailable", reason: "malformed" }],
+		["partial final record", ({ native }) => appendFileSync(native.jsonlPath, '{"type":"user"'), { kind: "unavailable", reason: "incomplete" }],
+		["unreadable file", ({ native }) => { execFileSync("trash", [native.jsonlPath]); mkdirSync(native.jsonlPath); }, { kind: "unavailable", reason: "unreadable" }],
+	]) {
+		it(`rebuilds read-only for a ${name} with a typed inspection result`, async () => {
+			await fixture(async data => {
+				alter(data);
+				const { inspectTranscriptAfterLeaf } = await import("../src/transcript-ownership.ts");
+				assert.deepEqual(inspectTranscriptAfterLeaf(data.native.jsonlPath, __testGetBridgeIntegrityState().sharedSession.transcriptLeaf), inspection);
+				const source = name === "unreadable file" ? null : readFileSync(data.native.jsonlPath);
+				const result = await syncSharedSession(data.messages, data.cwd);
+				assert.notEqual(result.sessionId, data.native.sessionId);
+				assert.equal(result.sync.mark, inspection.kind === "changed" ? "transcript-written" : "transcript-unverified");
+				if (source) assert.deepEqual(readFileSync(data.native.jsonlPath), source);
+			});
+		});
+	}
+
+	it("does not fabricate a checkpoint when no assistant envelope was observed", async () => {
+		await fixture(async ({ native, messages, record, cwd }) => {
+			const { transcriptLeaf, ...withoutCheckpoint } = record;
+			setSharedSession(withoutCheckpoint);
+			appendFileSync(native.jsonlPath, JSON.stringify(external[0][1]) + "\n");
+			const result = await syncSharedSession(messages, cwd);
+			assert.equal(result.sessionId, native.sessionId);
+			assert.equal(__testGetBridgeIntegrityState().sharedSession.transcriptLeaf, undefined);
 		});
 	});
 });

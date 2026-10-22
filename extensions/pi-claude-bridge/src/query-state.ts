@@ -603,6 +603,8 @@ export class QueryContext {
 	 *  Undefined until it arrives; the audit trail omits the field rather than
 	 *  guessing. */
 	childSessionId: string | undefined;
+	/** Latest top-level assistant record observed in the current SDK query. */
+	transcriptCheckpoint: { sessionId: string; uuid: string } | null = null;
 	/** Anthropic content-block indexes of the current assistant message that carry
 	 *  a child-executed tool_use. Scoped to one message: cleared at message_start,
 	 *  and an index is released as soon as another block starts there. */

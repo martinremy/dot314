@@ -9,6 +9,8 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 - Adapted nicobailon's fix for retries after a reply to tool results fails. Pi continues from completed results instead of ending with an empty response. Repeated failures rebuild the retry prompt once, and cancellation and billing stops remain terminal.
 - One-shot requests use separate execution state even when their history contains the main conversation's tool calls. Their own tool-result callbacks continue the same auxiliary query.
 
+- Adapted nicobailon's checks for copied Pi files and external transcript writes. Copied or unproven Pi session files rebuild into separate Claude transcripts, and ordinary restoration still rejects another Pi session ID. Native assistant checkpoints detect appended conversation turns before reuse or replacement, including when a rebuild is already pending. Changed or unreadable sources remain intact while the bridge rebuilds from verified history.
+
 ## 2026-10-12
 
 ### Fixed

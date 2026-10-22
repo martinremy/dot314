@@ -101,7 +101,9 @@ A forked Pi session can copy a verified prefix of its parent's Claude transcript
 
 When Pi retries a failed reply to completed tool results, Claude continues from those results. One-shot requests, such as conversation summaries, use separate execution state and leave the main conversation intact.
 
-The bridge saves which Claude Code session belongs to the Pi session in the Pi session file, so reopening a Pi session resumes the same Claude Code conversation. When Pi compacts or rewrites the history during a Pi tool call, the bridge restarts from Pi's new history with the completed tool results. A query that used one of Claude Code's own connectors finishes first, and the next turn uses Pi's new history.
+The bridge records the Pi session file's identity alongside its Claude Code session, so reopening the same file can resume the conversation. A copied Pi file gets a separate Claude transcript built from its own history; the source transcript stays intact. Saved sessions whose file identity is unknown also get a separate transcript on restore. If another writer adds conversation turns after the bridge's last observed Claude reply, the next request rebuilds into a separate transcript from Pi's history.
+
+When Pi compacts or rewrites the history during a Pi tool call, the bridge restarts from Pi's new history with the completed tool results. A query that used one of Claude Code's own connectors finishes first, and the next turn uses Pi's new history.
 
 ## Install
 

@@ -108,6 +108,7 @@ describe("account-scoped session persistence", () => {
 				accountProfileId: "profile-a",
 				fingerprint: fingerprint(messages),
 				piSessionId: "pi-session",
+				piSessionFile: join(root, "pi.jsonl"),
 				updatedAt: new Date().toISOString(),
 			},
 		};
@@ -117,6 +118,7 @@ describe("account-scoped session persistence", () => {
 			sessionManager: {
 				getEntries: () => [marker],
 				getSessionId: () => "pi-session",
+				getSessionFile: () => join(root, "pi.jsonl"),
 				getCwd: () => cwd,
 				buildSessionContext: () => ({ messages }),
 			},

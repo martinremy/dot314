@@ -1,8 +1,8 @@
 import { type AssistantMessage, type Context } from "@earendil-works/pi-ai";
-import { createSession, deleteSession, openSession, repairToolPairing, serializeRecord, type JsonlRecord } from "cc-session-io";
+import { createSession, deleteSession, getSessionPath, openSession, repairToolPairing, serializeRecord, type JsonlRecord } from "cc-session-io";
 import { createHash } from "crypto";
 import { closeSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
-import { dirname, resolve as pathResolve } from "path";
+import { dirname } from "path";
 import { REBUILD_MARKS, getExtensionApi, getSharedSession, reportSyntheticToolResultRepair, safeNotify, setSharedSession, type SessionState } from "./bridge-state.ts";
 import { z } from "zod";
 import { displayPath } from "./config.ts";
@@ -21,6 +21,9 @@ import {
 	recoverLaterToolResults,
 } from "./tool-pairing-audit.ts";
 import { claudeDirForProfile, resolveClaudeAccountRouter, type AccountSessionScope } from "./account-router.ts";
+import { assessRestoredTranscriptOwnership, inspectTranscriptAfterLeaf } from "./transcript-ownership.ts";
+
+export { shouldRestorePersistedBridgeEntry } from "./transcript-ownership.ts";
 
 // --- Session persistence ---
 
@@ -33,10 +36,14 @@ const BRIDGE_SESSION_CUSTOM_TYPE = "claude-bridge-session";
 interface PersistedBridgeSessionState extends Omit<SessionState, "claudeConfigDir"> {
 	fingerprint: string;
 	piSessionId?: string;
+	piSessionFile?: string;
 	updatedAt: string;
 }
 
 const persistedMetadataSchema = z.object({
+	piSessionId: z.string().min(1).optional(),
+	piSessionFile: z.string().min(1).optional(),
+	transcriptLeaf: z.string().min(1).optional(),
 	conversationFingerprint: z.string().optional(),
 	historyDigest: z.string().optional(),
 	trailingAssistantDigest: z.string().optional(),
@@ -46,6 +53,12 @@ const persistedMetadataSchema = z.object({
 	accountProfileId: z.string().optional(),
 });
 type PersistedSessionMetadata = z.infer<typeof persistedMetadataSchema>;
+
+interface SessionManagerIdentity {
+	getSessionId?: () => string;
+	getSessionFile?: () => string | undefined;
+	getCwd?: () => string;
+}
 
 function normalizedMessageText(message: unknown): string {
 	const content = (message as { content?: unknown }).content;
@@ -181,47 +194,26 @@ function claudeSessionExists(sessionId: string, cwd: string, claudeDir: string |
 	}
 }
 
-function canonicalize(p: string | undefined): string | undefined {
-	if (!p) return undefined;
-	try { return realpathSync.native(p); } catch { return pathResolve(p); }
-}
-
-// Decides whether a persisted bridge-session marker is safe to restore.
-//
-// The fork case is the load-bearing one: pi/core's createBranchedSession copies
-// every non-label entry from root→leaf into the fork session file. That includes
-// our claude-bridge-session markers from the parent. Restoring from them would
-// --resume parent's Claude jsonl on the fork's first turn, leaking conversation
-// past the fork point.
-//
-// Returns undefined when the entry is safe to use, or a short rejection reason
-// for diagnostic logging. Old entries without piSessionId always reject, which
-// degrades safely to the rebuild path.
-export function shouldRestorePersistedBridgeEntry(
-	persisted: { piSessionId?: string; cwd: string },
-	currentPiSessionId: string | undefined,
-	currentCwd: string | undefined,
-): string | undefined {
-	if (!persisted.piSessionId) return "missing piSessionId";
-	if (currentPiSessionId && persisted.piSessionId !== currentPiSessionId) {
-		return `piSessionId mismatch (persisted=${persisted.piSessionId} current=${currentPiSessionId})`;
-	}
-	if (currentCwd && canonicalize(persisted.cwd) !== canonicalize(currentCwd)) {
-		return `cwd mismatch (persisted=${persisted.cwd} current=${currentCwd})`;
-	}
-	return undefined;
-}
-
 /** Restores an own-session marker; explicit parent mode marks a fork's parent record for copying into a new session. */
-export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?: string }, source: "own" | "parent" = "own"): void {
+export function restoreSharedSessionFromPi(ctx: { sessionManager?: SessionManagerIdentity; cwd?: string }, source: "own" | "parent" = "own"): void {
 	const persisted = latestPersistedBridgeSession(ctx.sessionManager);
 	if (!persisted) return;
-	const currentPiSessionId = typeof (ctx.sessionManager as any)?.getSessionId === "function" ? (ctx.sessionManager as any).getSessionId() : undefined;
-	const currentCwd = typeof (ctx.sessionManager as any)?.getCwd === "function" ? (ctx.sessionManager as any).getCwd() : ctx.cwd;
-	const rejection = shouldRestorePersistedBridgeEntry(persisted, currentPiSessionId, currentCwd);
-	const inherited = source === "parent" && Boolean(currentPiSessionId) && Boolean(persisted.piSessionId) && persisted.piSessionId !== currentPiSessionId;
-	if (rejection && !inherited) {
-		debug(`restoreSharedSession: ${rejection} — forcing rebuild`);
+	const metadata = persistedMetadataSchema.safeParse(persisted);
+	if (!metadata.success) {
+		debug("restoreSharedSession: invalid session metadata; forcing rebuild");
+		return;
+	}
+	const sessionManager = ctx.sessionManager;
+	const currentPiSessionId = Boolean(sessionManager.getSessionId) ? sessionManager.getSessionId() : undefined;
+	const currentPiSessionFile = Boolean(sessionManager.getSessionFile) ? sessionManager.getSessionFile() : undefined;
+	const currentCwd = Boolean(sessionManager.getCwd) ? sessionManager.getCwd() : ctx.cwd;
+	const ownership = assessRestoredTranscriptOwnership({
+		storedPiSessionId: metadata.data.piSessionId, currentPiSessionId,
+		storedPiSessionFile: metadata.data.piSessionFile, currentPiSessionFile,
+		storedCwd: persisted.cwd, currentCwd, source,
+	});
+	if (ownership.kind === "reject") {
+		debug(`restoreSharedSession: ${ownership.reason}; forcing rebuild`);
 		return;
 	}
 	const built = readBuiltSessionContext(ctx.sessionManager);
@@ -232,27 +224,23 @@ export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?
 		debug(`restoreSharedSession: fingerprint mismatch for ${persisted.sessionId.slice(0, 8)}`);
 		return;
 	}
-	const metadata = persistedMetadataSchema.safeParse(persisted);
-	if (!metadata.success) {
-		debug("restoreSharedSession: invalid session metadata; forcing rebuild");
-		return;
-	}
-	publishRestoredSession(persisted, cursor, metadata.data, inherited ? "parent" : "own");
+	publishRestoredSession(persisted, cursor, metadata.data, ownership.kind);
 }
 
-function publishRestoredSession(persisted: PersistedBridgeSessionState, cursor: number, metadata: PersistedSessionMetadata, ownership: "own" | "parent"): void {
+function publishRestoredSession(persisted: PersistedBridgeSessionState, cursor: number, metadata: PersistedSessionMetadata, ownership: "own" | "copy"): void {
+	const { piSessionId: _piId, piSessionFile: _piFile, ...sessionMetadata } = metadata;
 	const accountProfileId = metadata.accountProfileId;
 	const claudeConfigDir = accountProfileId
 		? claudeDirForProfile(resolveClaudeAccountRouter()?.resolveProfile?.(accountProfileId) ?? {})
 		: undefined;
-	if (ownership === "parent") {
-		const parent: SessionState = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd, needsRebuild: true, rebuildReason: "inherited", inherited: true };
+	if (ownership === "copy") {
+		const parent: SessionState = { ...sessionMetadata, sessionId: persisted.sessionId, cursor, cwd: persisted.cwd, needsRebuild: true, rebuildReason: "inherited", inherited: true };
 		if (accountProfileId) {
 			parent.accountProfileId = accountProfileId;
 			parent.claudeConfigDir = claudeConfigDir;
 		}
 		setSharedSession(parent);
-		debug("restoreSharedSession: copying a parent transcript on the next rebuild", persisted.sessionId.slice(0, 8));
+		debug("restoreSharedSession: copying a read-only transcript on the next rebuild", persisted.sessionId.slice(0, 8));
 		return;
 	}
 	if (!claudeSessionExists(persisted.sessionId, persisted.cwd, claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR)) {
@@ -260,7 +248,7 @@ function publishRestoredSession(persisted: PersistedBridgeSessionState, cursor: 
 		return;
 	}
 	setSharedSession({
-		...metadata,
+		...sessionMetadata,
 		sessionId: persisted.sessionId,
 		cursor,
 		cwd: persisted.cwd,
@@ -305,7 +293,7 @@ export function __testCancelAllScheduledSessionPersistence(): void {
 	timers.clear();
 }
 
-export function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknown }): void {
+export function schedulePersistSharedSession(ctxLike?: { sessionManager?: SessionManagerIdentity }): void {
 	const sharedSession = getSharedSession();
 	const extensionApi = getExtensionApi();
 	if (!extensionApi || !sharedSession || !ctxLike?.sessionManager) return;
@@ -313,7 +301,9 @@ export function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknow
 	// Extension contexts become guarded/stale as soon as shutdown or replacement
 	// starts. Capture the plain SessionManager reference now and cancel the timer
 	// on shutdown rather than dereferencing the ctx proxy from the next tick.
-	const sessionManager = ctxLike.sessionManager as object;
+	const sessionManager = ctxLike.sessionManager;
+	const piSessionId = Boolean(sessionManager.getSessionId) ? sessionManager.getSessionId() : undefined;
+	const piSessionFile = Boolean(sessionManager.getSessionFile) ? sessionManager.getSessionFile() : undefined;
 	// Persist only the opaque profile id — the resolved config dir is an
 	// account-identifying path and stays in memory (see PersistedBridgeSessionState).
 	const { claudeConfigDir: _omitted, ...snapshot } = sharedSession;
@@ -331,9 +321,10 @@ export function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknow
 				...snapshot,
 				cursor,
 				fingerprint: fingerprintMessages(built.messages.slice(0, cursor)),
-				piSessionId: typeof (sessionManager as any)?.getSessionId === "function" ? (sessionManager as any).getSessionId() : undefined,
+				piSessionId,
 				updatedAt: new Date().toISOString(),
 			};
+			if (piSessionFile) data.piSessionFile = piSessionFile;
 			extensionApi?.appendEntry(BRIDGE_SESSION_CUSTOM_TYPE, data);
 			debug(`persistSharedSession: saved ${data.sessionId.slice(0, 8)}, cursor=${data.cursor}`);
 		} catch (error) {
@@ -612,7 +603,7 @@ export function syncSharedSession(
 	account?: AccountSessionScope,
 	options: SyncOptions = {},
 ): SyncResult | Promise<SyncResult> {
-	const sharedSession = getSharedSession();
+	let sharedSession = getSharedSession();
 	// Everything before this query's prompt. A rebuild imports it and the
 	// prompt delivers the rest (user-prompt.ts promptRunStart).
 	const promptStart = promptRunStart(messages);
@@ -629,9 +620,6 @@ export function syncSharedSession(
 		sharedSession.claudeConfigDir === scopeConfigDir,
 	);
 	const incomingFingerprint = conversationFingerprint(messages);
-	// The reason the record was marked for rebuild, if it was (bridge-state.ts).
-	const mark = sharedSession?.needsRebuild ? sharedSession.rebuildReason ?? "unrecorded" : undefined;
-
 	// FOREIGN-CONVERSATION guard. A subagent-shaped query
 	// arriving while the parent is IDLE finds no running query to join, so it
 	// can land here. Without an identity check its short foreign context takes
@@ -666,6 +654,16 @@ export function syncSharedSession(
 		debug(`syncResult: path=foreign-one-shot cause=foreign-conversation`);
 		return { sessionId: null, promptStart: lastConversationIndex(messages), foreignContext: true, sync: { path: "foreign-one-shot", cause: "foreign-conversation" } };
 	}
+
+	if (Boolean(sharedSession) && sameAccount && sharedSession.transcriptLeaf && !Boolean(sharedSession.inherited) && !sharedSession.forceRotate) {
+		const inspection = inspectTranscriptAfterLeaf(getSessionPath(sharedSession.sessionId, sharedSession.cwd, claudeDir), sharedSession.transcriptLeaf);
+		debug(`transcript inspection: session=${sharedSession.sessionId.slice(0, 8)} outcome=${inspection.kind}${inspection.kind !== "unchanged" ? ` reason=${inspection.reason}` : ""}`);
+		if (inspection.kind !== "unchanged") {
+			sharedSession = { ...sharedSession, inherited: true, needsRebuild: true, rebuildReason: inspection.kind === "changed" ? "transcript-written" : "transcript-unverified" };
+			setSharedSession(sharedSession);
+		}
+	}
+	const mark = Boolean(sharedSession) && sharedSession.needsRebuild ? sharedSession.rebuildReason ?? "unrecorded" : undefined;
 
 	// Why the REUSE check below failed, when it ran.
 	let digestCause: "digest-mismatch" | "unverified-digest" | undefined;
