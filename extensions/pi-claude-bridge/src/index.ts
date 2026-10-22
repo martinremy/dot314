@@ -14,6 +14,8 @@ import * as piAi from "@earendil-works/pi-ai";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
+import { getClaudeDir } from "cc-session-io";
+import { z } from "zod";
 import { PROVIDER_ID, lastConversationIndex } from "./convert.ts";
 import { extractUserPrompt, extractUserPromptBlocks, slashLed } from "./user-prompt.ts";
 import { buildModels, modelDisplayName } from "./models.ts";
@@ -32,12 +34,12 @@ import { logVersions } from "./versions.ts";
 import { noteAnomaly, notePromptSource, takeAgentNotice } from "./agent-notice.ts";
 import { preflightClaudeExecutable, resolveClaudeExecutable } from "./claude-executable.ts";
 import { connectorsEnabledFor, isChildExecutedTool } from "./connectors.ts";
-import { appendIntegrityEntry, argKeyCount, argKeys, deleteSharedSessionLane, getExtensionApi, getSharedSession, markSessionForRebuild, noteReloadWithLiveWriter, recordStartedLane, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, takeReloadWithLiveWriter, takeStartedLane, type RebuildMark, type SessionState } from "./bridge-state.ts";
+import { appendIntegrityEntry, argKeyCount, argKeys, deleteSharedSessionLane, getExtensionApi, getSharedSession, markSessionForRebuild, noteReloadWithLiveWriter, notifyRateLimitWarning, recordStartedLane, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, takeReloadWithLiveWriter, takeStartedLane, type RebuildMark, type SessionState } from "./bridge-state.ts";
 import { primeConnectorServers } from "./connector-runtime.ts";
 import { cancelScheduledSessionPersistence, conversationFingerprint, isForeignConversation, restoreSharedSessionFromPi, schedulePersistSharedSession, syncSharedSession, type SyncResult } from "./session-persistence.ts";
 import { UNVERIFIED_HISTORY_DIGEST, deliveredAssistantDigest, deliveredSuffix, historyDigest } from "./history-digest.ts";
 import { REPEATED_STALL_ERROR_MESSAGE, STREAM_IDLE_BACKOFF_HINT_MS, activeStreamIdleWatchdogs, buildStreamIdleTimeoutErrorMessage, createStreamIdleWatchdog, formatDurationShort, streamIdleTimeoutMsFromEnv } from "./stream-idle-watchdog.ts";
-import { RATE_LIMIT_TOKEN, formatResetTimestamp } from "./rate-limit.ts";
+import { RATE_LIMIT_TOKEN, formatRejectedClaudeLimitError, formatResetTimestamp } from "./rate-limit.ts";
 import { mapToolArgs, markAuthoritativeManifest, mcpToolAliases } from "./tool-mapping.ts";
 import { ABORTED_MESSAGE, endStreamForFailure, finalizeCurrentStream, finalizeToolUseTurnFromMcpInvocation, markContinuationStart, scheduleToolUseTurnEnd, terminalMessage, updateTurnResponseModel, withdrawCancelledToolCall } from "./assistant-stream.ts";
 import {
@@ -1473,6 +1475,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 		claudeExecutable,
 	});
 	const { queryOptions } = built;
+	const noticeAccountKey = Boolean(account) ? `managed:${account.profileId}` : `unmanaged:${getClaudeDir(queryOptions.env.CLAUDE_CONFIG_DIR)}`;
 	const renderInstructions = (messages: Context["messages"]): string => {
 		const system = getCurrentSystemMessage(messages);
 		const sections = Boolean(system) ? system.sections : undefined;
@@ -1666,6 +1669,12 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 				quarantine("idle-timeout");
 				const errorMessage = buildStreamIdleTimeoutErrorMessage(timeoutMs);
 				debug("provider: stream idle timeout", `model=${queryModel.id}`, `timeout=${timeoutMs}`, `idle=${idleMs}`);
+				if (Boolean(abortCtx.rejectedClaudeLimit)) {
+					abortCtx.handledTerminalError = true;
+					surfaceFailure({ message: errorMessage });
+					requestAbort();
+					return;
+				}
 				if (syncResult.sync.path === "rebuild" && syncResult.sync.mark === "idle-timeout" && !abortCtx.apiResponded) {
 					abortCtx.handledTerminalError = true;
 					debug("provider: consecutive unanswered attempts; stopping automatic retries");
@@ -1748,21 +1757,29 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	// (endStreamForFailure decides that, from the query's own state).
 	const surfaceFailure = (failure: ClaudeAttemptFailure): void => {
 		attemptBuffer?.commit();
-		if (failure.rateLimitInfo) {
+		if (Boolean(failure.rateLimitInfo) && !abortCtx.requestAborted() && failure.kind !== "usage-credits") {
 			// Managed rate-limit that will NOT rotate — this is the single place its
 			// event + toast are emitted (the legacy path emitted inline instead).
 			const info = failure.rateLimitInfo;
 			const resetAt = rateLimitResetFromInfo(info);
 			const resetAtMs = rateLimitResetMs(info);
+			const limitType = z.string().trim().min(1).safeParse(rateLimitTypeFromInfo(info));
 			emitRateLimitEvent({
 				model: queryModel.id, provider: queryModel.provider, rateLimitType: rateLimitTypeFromInfo(info),
 				reason: failure.message, resetAt,
 				...(Number.isFinite(resetAtMs) ? { resetAtMs } : {}),
 				source: "claude-bridge", status: "rejected",
 			});
-			safeNotify(`${RATE_LIMIT_TOKEN} Claude ${failure.message} — resets ${formatResetTimestamp(resetAtMs ?? resetAt)}`, "warning");
+			notifyRateLimitWarning(noticeAccountKey, {
+				status: "rejected",
+				limitType: limitType.success ? limitType.data : null,
+				resetAtMs: Number.isFinite(resetAtMs) ? resetAtMs : null,
+			}, `${RATE_LIMIT_TOKEN} Claude ${failure.message}; resets ${formatResetTimestamp(resetAt)}`);
 		}
-		noteFailedCallback(endStreamForFailure(abortCtx, { errorMessage: failure.message }), failure.message);
+		const errorMessage = Boolean(abortCtx.rejectedClaudeLimit) && failure.kind !== "usage-credits"
+			? formatRejectedClaudeLimitError(abortCtx.rejectedClaudeLimit, failure.message)
+			: failure.message;
+		noteFailedCallback(endStreamForFailure(abortCtx, { errorMessage }), errorMessage);
 	};
 
 	// Background consumer — runs until this attempt's query ends. Before any
@@ -1774,7 +1791,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	// this query still ends later, and live-ctx handlers would mutate the next
 	// query's turn state and stream and skip this query's own teardown.
 	let reentryStream = stream;
-	consumeQuery(sdkQuery, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, account, router, attemptFailure)
+	consumeQuery(sdkQuery, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, noticeAccountKey, account, router, attemptFailure)
 		.then(async ({ capturedSessionId, failure }) => {
 			if (Boolean(failure) && failure.kind === "usage-credits" && Boolean(abortCtx.restartRequest)) {
 				const restart = abortCtx.restartRequest;
@@ -1878,7 +1895,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 					debug(`provider: continuation query, model=${queryModel.id}, resume=${resumeId.slice(0, 8)}, account=${account?.label ?? "legacy"}, prompt=${steerShape}`);
 
 					try {
-						const continuation = await consumeQuery(contQuery, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, account, router);
+						const continuation = await consumeQuery(contQuery, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, noticeAccountKey, account, router);
 						if (Boolean(abortCtx.restartRequest)) break;
 						if (continuation.failure) {
 							// Continuations never rotate: the original prompt already

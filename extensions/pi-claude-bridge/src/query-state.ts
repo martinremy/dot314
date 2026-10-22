@@ -14,6 +14,7 @@ import { isConnectorTool } from "./connectors.ts";
 import { lastConversationIndex } from "./convert.ts";
 import type { McpResult } from "./extract-tool-results.ts";
 import { currentRequestLaneId } from "./request-lane.ts";
+import { type RejectedClaudeLimit } from "./rate-limit.ts";
 import { debug, diagDump } from "./debug.ts";
 import { noteAnomaly } from "./agent-notice.ts";
 import type { RequestTiming, StepTotals } from "./request-timing.ts";
@@ -474,6 +475,7 @@ export class QueryContext {
 	 *  record only while no newer query has claimed this context. */
 	queryGeneration = 0;
 	handledTerminalError = false;
+	rejectedClaudeLimit: RejectedClaudeLimit | null = null;
 	/** The bridge's own abort path ran for this query (onAbort). */
 	abortRequested = false;
 	/** The query's abort handling (stream setup's onAbort), run when any

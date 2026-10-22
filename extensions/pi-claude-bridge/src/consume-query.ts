@@ -16,13 +16,13 @@ import {
 	type ClaudeAccountRouterV1,
 } from "./account-router.ts";
 import { endStreamForFailure, ensureTurnStarted, noteChildExecutedToolResults, processAssistantMessage, processStreamEvent, queryBlocks, updateTurnResponseModel } from "./assistant-stream.ts";
-import { appendIntegrityEntry, getExtensionApi, safeNotify } from "./bridge-state.ts";
+import { appendIntegrityEntry, getExtensionApi, notifyRateLimitWarning, safeNotify } from "./bridge-state.ts";
 import { type Config } from "./config.ts";
 import { debug, diagDump } from "./debug.ts";
 import { noteAnomaly } from "./agent-notice.ts";
 import { modelDisplayName } from "./models.ts";
 import { type QueryContext } from "./query-state.ts";
-import { RATE_LIMIT_AUTO_RESUME_EVENT, RATE_LIMIT_TOKEN, formatAllowedRateLimitWarning, formatResetTimestamp, isUsageLimitMessage, uniqueNonEmptyLines } from "./rate-limit.ts";
+import { RATE_LIMIT_AUTO_RESUME_EVENT, RATE_LIMIT_TOKEN, formatAllowedRateLimitWarning, formatResetTimestamp, isUsageLimitMessage, uniqueNonEmptyLines, type RejectedClaudeLimit } from "./rate-limit.ts";
 import { abortSdkQuery, sdkQueryAbandoned } from "./query-teardown.ts";
 import { activeStreamIdleWatchdogs } from "./stream-idle-watchdog.ts";
 import { logClaudeCodeVersion } from "./versions.ts";
@@ -160,6 +160,7 @@ export async function consumeQuery(
 	model: Model<any>,
 	bridgeConfig: Config,
 	wasAborted: () => boolean,
+	noticeAccountKey: string,
 	account?: ClaudeAccountRoute,
 	router?: ClaudeAccountRouterV1,
 	// Mirror of the held failure for the caller's .catch: the SDK iterator can
@@ -170,6 +171,7 @@ export async function consumeQuery(
 	attemptFailureBox?: { failure?: ClaudeAttemptFailure },
 ): Promise<ConsumeQueryResult> {
 	queryCtx.transcriptCheckpoint = null;
+	queryCtx.rejectedClaudeLimit = null;
 	let capturedSessionId: string | undefined;
 	let failure: ClaudeAttemptFailure | undefined;
 	let accountProbe: Promise<void> | undefined;
@@ -249,6 +251,7 @@ export async function consumeQuery(
 			}
 			case "result":
 				queryCtx.timing?.phase("sdkResult");
+				if (message.subtype === "success" && message.is_error !== true) queryCtx.rejectedClaudeLimit = null;
 				// A failure signal followed by a result whose visible output already
 				// committed (e.g. the SDK's fallback-model reroute recovering after a
 				// rejected rate limit) means the query ultimately SUCCEEDED: the
@@ -379,6 +382,13 @@ export async function consumeQuery(
 					abortSdkQuery(sdkQuery);
 					return { capturedSessionId, failure };
 				}
+				const limitType = z.string().trim().min(1).safeParse(rateLimitTypeFromInfo(info));
+				const resetAtMs = rateLimitResetMs(info);
+				const limit: RejectedClaudeLimit = {
+					limitType: limitType.success ? limitType.data : null,
+					resetAtMs: Number.isFinite(resetAtMs) ? resetAtMs : null,
+				};
+				if (!Boolean(account) && info.status === "rejected") queryCtx.rejectedClaudeLimit = limit;
 				if (!streamLive) break;
 				if (info?.status === "rejected") {
 					const rateLimitType = rateLimitTypeFromInfo(info);
@@ -393,9 +403,7 @@ export async function consumeQuery(
 						holdFailure({ kind: "rate-limit", message: reason, rateLimitInfo: info });
 						safeRouterCall("recordRateLimit", () => router.recordRateLimit(account.profileId, info, model.id));
 					} else {
-						// Legacy: notify once and set NO failure state. The SDK's own
-						// fallback-model path may still stream a successful recovery, and
-						// that turn must complete exactly like any other success.
+						// A rejection is informational until the SDK finishes: it may recover.
 						const resetsAt = formatResetTimestamp(resetAtMs ?? resetAt);
 						emitRateLimitEvent({
 							model: model.id,
@@ -407,11 +415,11 @@ export async function consumeQuery(
 							source: "claude-bridge",
 							status: "rejected",
 						});
-						safeNotify(`${RATE_LIMIT_TOKEN} Claude ${reason} hit — resets ${resetsAt}`, "warning");
+						notifyRateLimitWarning(noticeAccountKey, { ...limit, status: "rejected" }, `${RATE_LIMIT_TOKEN} Claude ${reason} hit; resets ${resetsAt}`);
 					}
 				} else if (info?.status === "allowed_warning") {
 					const warning = formatAllowedRateLimitWarning(info);
-					if (warning) safeNotify(warning, "warning");
+					if (warning) notifyRateLimitWarning(noticeAccountKey, { ...limit, status: "allowed_warning" }, warning);
 					else debug("consumeQuery: suppressed low/ambiguous allowed_warning rate_limit_event", JSON.stringify(info).slice(0, 300));
 				}
 				break;

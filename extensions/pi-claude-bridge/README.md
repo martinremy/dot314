@@ -172,6 +172,8 @@ Environment variables:
 
 Tool-result integrity problems add a metadata-only `claude-bridge-integrity` entry to the Pi session file, so a lost tool result can be analysed from the session alone. Only some also show a TUI warning: a repaired or interrupted tool result, a tool call Claude Code stopped waiting for, and a failed answer to a mid-turn message.
 
+Rate-limit warnings appear once per account and Pi interface for each status and limit type until the reported reset time changes. A rejected allowance remains the cause of a later connection error or idle timeout, so Pi treats it as a nonretryable quota error. Claude Code can still recover and complete the request successfully. Cancellation and the usage-credit policy take precedence.
+
 Maintainer notes and the test suites are in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Differences from Kendex upstream

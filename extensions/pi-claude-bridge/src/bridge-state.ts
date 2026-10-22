@@ -5,6 +5,7 @@ import { UNVERIFIED_HISTORY_DIGEST } from "./history-digest.ts";
 import { notePiSessionEnded, notePiSessionStarted } from "./pi-sessions.ts";
 import { type QueryContext } from "./query-state.ts";
 import { currentRequestLaneId } from "./request-lane.ts";
+import { type RateLimitNoticeState } from "./rate-limit.ts";
 import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairing-audit.ts";
 
 /** Why a record was marked needsRebuild, for the debug log's syncResult and
@@ -225,9 +226,41 @@ export function setPiUI(next: ExtensionUIContext | undefined): void {
 	piUI = next;
 }
 
-export function safeNotify(message: string, level: "info" | "warning" | "error" = "warning"): void {
-	try { piUI?.notify(message, level); }
-	catch (error) { debug("notify failed:", error); }
+export function safeNotify(message: string, level: "info" | "warning" | "error" = "warning"): boolean {
+	if (!Boolean(piUI)) return false;
+	try {
+		piUI.notify(message, level);
+		return true;
+	} catch (error) {
+		debug("notify failed:", error);
+		return false;
+	}
+}
+
+const RATE_LIMIT_NOTICES_SYMBOL = Symbol.for("kendex.pi.claude-bridge.rate-limit-notices.v1");
+
+function rateLimitNotices(): WeakMap<object, Map<string, number | null>> {
+	// SAFETY: this versioned symbol is owned here and stores only the notice map below.
+	const host = globalThis as typeof globalThis & { [RATE_LIMIT_NOTICES_SYMBOL]?: WeakMap<object, Map<string, number | null>> };
+	let notices = host[RATE_LIMIT_NOTICES_SYMBOL];
+	if (!Boolean(notices)) {
+		notices = new WeakMap<object, Map<string, number | null>>();
+		host[RATE_LIMIT_NOTICES_SYMBOL] = notices;
+	}
+	return notices;
+}
+
+export function notifyRateLimitWarning(accountKey: string, state: RateLimitNoticeState, message: string): void {
+	const recipient = piUI;
+	if (!Boolean(recipient)) return;
+	const notices = rateLimitNotices();
+	const shown = notices.get(recipient);
+	const key = JSON.stringify([accountKey, state.status, state.limitType]);
+	if (Boolean(shown) && shown.get(key) === state.resetAtMs) return;
+	if (!safeNotify(message, "warning")) return;
+	const updated = Boolean(shown) ? shown : new Map<string, number | null>();
+	updated.set(key, state.resetAtMs);
+	notices.set(recipient, updated);
 }
 
 export function argKeys(args: Record<string, unknown> | undefined): string[] {

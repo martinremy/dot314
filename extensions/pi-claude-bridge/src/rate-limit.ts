@@ -3,6 +3,15 @@ import { USAGE_LIMIT_ERROR_PREFIXES } from "@anthropic-ai/claude-agent-sdk";
 export const RATE_LIMIT_AUTO_RESUME_EVENT = "pi-claude:rate-limit";
 export const RATE_LIMIT_TOKEN = "\x1b[31m[rate-limit]\x1b[39m";
 
+export interface RejectedClaudeLimit {
+	limitType: string | null;
+	resetAtMs: number | null;
+}
+
+export interface RateLimitNoticeState extends RejectedClaudeLimit {
+	status: "allowed_warning" | "rejected";
+}
+
 // The SDK export is @alpha — degrade to "no match" (pre-0.3.220 behavior) if a
 // future release drops it, instead of crashing message classification.
 const USAGE_LIMIT_PREFIXES: readonly string[] = Array.isArray(USAGE_LIMIT_ERROR_PREFIXES as unknown)
@@ -23,6 +32,13 @@ function coerceMessageText(value: unknown): string {
 export function isUsageLimitMessage(value: unknown): boolean {
 	const text = coerceMessageText(value);
 	return USAGE_LIMIT_PREFIXES.some((prefix) => text.includes(prefix));
+}
+
+export function formatRejectedClaudeLimitError(limit: RejectedClaudeLimit, detail: string): string {
+	if (isUsageLimitMessage(detail)) return detail;
+	const label = limit.limitType === null ? "usage limit" : `${limit.limitType} limit`;
+	const reset = limit.resetAtMs === null ? "" : `; resets ${formatResetTimestamp(limit.resetAtMs)}`;
+	return `Claude usage quota exceeded: ${label}${reset}\n${detail}`;
 }
 
 export function uniqueNonEmptyLines(values: unknown[]): string[] {

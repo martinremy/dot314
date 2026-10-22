@@ -72,9 +72,9 @@ it("ignores cancelled envelopes and keeps checkpoint state on the captured query
 	const captured = new QueryContext();
 	captured.resetTurnState(model);
 	const replacement = ctx();
-	await consumeQuery(query([envelope("old-native", "old-leaf")]), captured, new Map(), model, {}, () => false);
+	await consumeQuery(query([envelope("old-native", "old-leaf")]), captured, new Map(), model, {}, () => false, "unmanaged:fixture");
 	assert.deepEqual(captured.transcriptCheckpoint, { sessionId: "old-native", uuid: "old-leaf" });
 	assert.equal(replacement.transcriptCheckpoint, null);
-	await consumeQuery(query([envelope("old-native", "cancelled-leaf")]), captured, new Map(), model, {}, () => true);
+	await consumeQuery(query([envelope("old-native", "cancelled-leaf")]), captured, new Map(), model, {}, () => true, "unmanaged:fixture");
 	assert.equal(captured.transcriptCheckpoint, null);
 });
