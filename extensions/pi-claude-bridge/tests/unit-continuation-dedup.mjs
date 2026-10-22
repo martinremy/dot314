@@ -12,6 +12,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { isContextOverflow } from "@earendil-works/pi-ai";
+import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, shouldCompact } from "@earendil-works/pi-coding-agent";
 
 import { __testSetBridgeIntegrityState, __testSetSdkQueryFactory, streamClaudeAgentSdk } from "../src/index.ts";
 import { setExtensionApi } from "../src/bridge-state.ts";
@@ -141,4 +143,24 @@ describe("duplicates within one query are still rendered once", () => {
 		const done = await runLikePi("dedup-limit");
 		assert.deepEqual(summarize(done.message.content), [limit]);
 	});
+});
+
+it("reports the latest deferred request's usage, including a completed-message re-yield", async () => {
+	const first = assistant("m1", [text("first")]);
+	first.message.usage = { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 60000, cache_creation_input_tokens: 5000 };
+	const last = assistant("m2", [text("second")]);
+	last.message.usage = { input_tokens: 5, output_tokens: 30, cache_read_input_tokens: 61000, cache_creation_input_tokens: 2000, cache_creation: { ephemeral_1h_input_tokens: 1500 }, output_tokens_details: { thinking_tokens: 12 } };
+	installQueries(
+		[init, first, success("first")],
+		[init, { type: "stream_event", event: { type: "message_start", message: { id: "m2", model: model.id, usage: last.message.usage } } }, last, last, success("second")],
+	);
+	const done = await runLikePi("latest-continuation-usage");
+	assert.deepEqual(summarize(done.message.content), ["first", "second"]);
+	assert.equal(done.message.usage.cacheRead, 61000);
+	assert.equal(done.message.usage.cacheWrite, 2000);
+	assert.equal(done.message.usage.cacheWrite1h, 1500);
+	assert.equal(done.message.usage.reasoning, 12);
+	assert.equal(calculateContextTokens(done.message.usage), 63035);
+	assert.equal(shouldCompact(calculateContextTokens(done.message.usage), 100000, DEFAULT_COMPACTION_SETTINGS), false);
+	assert.equal(isContextOverflow(done.message, 100000), false);
 });

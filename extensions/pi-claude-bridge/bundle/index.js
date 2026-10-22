@@ -17157,63 +17157,16 @@ var QueryContext = class {
    *  a child-executed tool_use. Scoped to one message: cleared at message_start,
    *  and an index is released as soon as another block starts there. */
   childExecutedStreamIndexes = /* @__PURE__ */ new Set();
-  // Usage accounting for a Pi turn that spans SEVERAL child assistant messages.
-  //
-  // Every child message is a separate billed API call, and each reports its own
-  // counters — `message_start`/`message_delta` REPLACE rather than accumulate. A
-  // Pi turn that ends at its first tool call spans one child message, where
-  // replacing is right. A turn containing a child-executed connector call keeps
-  // running across the child's follow-up messages, so replacing would silently
-  // drop everything the earlier ones billed.
-  //
-  // So: `turnUsageCarry` holds the totals of the child messages already COMPLETE
-  // in this Pi turn, `currentMessageUsage` holds the one in flight, and the Pi
-  // message reports their sum. Summing is the correct model for input and cache
-  // too — each call bills its own.
-  // `reasoning` stays undefined until the child reports thinking tokens, so Pi
-  // can tell "no breakdown" from zero.
-  turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  // Pi uses usage as context size, so only the latest child request counts.
   currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   /** Anthropic id of the child message `currentMessageUsage` describes. */
   currentMessageId;
-  /**
-   * Declare which child message the following usage belongs to, banking the
-   * previous one's counters into the turn total.
-   *
-   * Keyed on the MESSAGE ID rather than on the call site, because both paths
-   * that see a message boundary can fire for the SAME message: `message_start`
-   * arrives on the stream, and the SDK then yields that message again in
-   * completed form. Banking per call site double-counted whenever the completed
-   * copy took the no-stream-events branch — which it does whenever a message
-   * produced no content blocks, since `turnSawStreamEvent` only tracks those.
-   *
-   * With no id on either side (older/streamless shapes) this degrades to
-   * banking on every call, which is what each caller means when it cannot
-   * prove otherwise.
-   */
+  /** Reset counters for a new message; streamed and completed copies share an ID. */
   beginChildMessage(messageId) {
     const id = typeof messageId === "string" && messageId.length > 0 ? messageId : void 0;
     if (id !== void 0 && id === this.currentMessageId) return;
-    this.turnUsageCarry.input += this.currentMessageUsage.input;
-    this.turnUsageCarry.output += this.currentMessageUsage.output;
-    this.turnUsageCarry.cacheRead += this.currentMessageUsage.cacheRead;
-    this.turnUsageCarry.cacheWrite += this.currentMessageUsage.cacheWrite;
-    if (this.currentMessageUsage.reasoning !== void 0) {
-      this.turnUsageCarry.reasoning = (this.turnUsageCarry.reasoning ?? 0) + this.currentMessageUsage.reasoning;
-    }
     this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     this.currentMessageId = id;
-  }
-  /**
-   * Declare that `messageId` REPLACES the in-flight child message instead of
-   * following it: Claude Code retried an abandoned attempt. The abandoned
-   * attempt's counters are dropped rather than banked. Pi reads the last
-   * assistant message's input and cache figures as the context size, and
-   * banking both attempts would double it.
-   */
-  replaceChildMessage(messageId) {
-    this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-    this.currentMessageId = typeof messageId === "string" && messageId.length > 0 ? messageId : void 0;
   }
   // Per-turn (reset together)
   turnOutput = null;
@@ -17301,14 +17254,13 @@ var QueryContext = class {
       clearTimeout(this.scheduledToolUseEnd.timer);
       this.scheduledToolUseEnd = null;
     }
-    this.turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     this.currentMessageId = void 0;
   }
   /** Start another SDK query within the same live Pi request. Unlike
-   * resetTurnState, keeps the accumulated Pi message and usage: deferred replay
-   * can add several Claude replies before Pi's single terminal event. Per-query
-   * flags reset so a streamless continuation is not mistaken for the prior reply. */
+   * resetTurnState, keeps the displayed Pi content; the next Claude message
+   * replaces usage. Per-query flags reset so a streamless continuation is not
+   * mistaken for the prior reply. */
   prepareContinuation() {
     this.turnSawStreamEvent = false;
     this.turnSawToolCall = false;
@@ -18565,20 +18517,22 @@ function mapToolArgs(toolName, args) {
 // src/assistant-stream.ts
 function updateUsage(output, usage, model, c) {
   const current = c.currentMessageUsage;
-  const carry = c.turnUsageCarry;
   if (usage.input_tokens != null) current.input = usage.input_tokens;
   if (usage.output_tokens != null) current.output = usage.output_tokens;
   if (usage.cache_read_input_tokens != null) current.cacheRead = usage.cache_read_input_tokens;
   if (usage.cache_creation_input_tokens != null) current.cacheWrite = usage.cache_creation_input_tokens;
   const thinking = usage.output_tokens_details?.thinking_tokens;
   if (thinking != null) current.reasoning = thinking;
-  output.usage.input = carry.input + current.input;
-  output.usage.output = carry.output + current.output;
-  output.usage.cacheRead = carry.cacheRead + current.cacheRead;
-  output.usage.cacheWrite = carry.cacheWrite + current.cacheWrite;
-  if (carry.reasoning !== void 0 || current.reasoning !== void 0) {
-    output.usage.reasoning = (carry.reasoning ?? 0) + (current.reasoning ?? 0);
-  }
+  const cacheWrite1h = Boolean(usage.cache_creation) ? usage.cache_creation.ephemeral_1h_input_tokens : void 0;
+  if (Number.isFinite(cacheWrite1h)) current.cacheWrite1h = cacheWrite1h;
+  output.usage.input = current.input;
+  output.usage.output = current.output;
+  output.usage.cacheRead = current.cacheRead;
+  output.usage.cacheWrite = current.cacheWrite;
+  if ("reasoning" in current) output.usage.reasoning = current.reasoning;
+  else delete output.usage.reasoning;
+  if ("cacheWrite1h" in current) output.usage.cacheWrite1h = current.cacheWrite1h;
+  else delete output.usage.cacheWrite1h;
   output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
   calculateCost(model, output.usage);
   if (!DEBUG) return;
@@ -19000,8 +18954,7 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
     if (retry) discardAbandonedAttempt(c, "restreamed", event.message?.id);
     reapStaleQueuedResults(c);
     c.resetToolTracking();
-    if (retry) c.replaceChildMessage(event.message?.id);
-    else c.beginChildMessage(event.message?.id);
+    c.beginChildMessage(event.message?.id);
     c.streamAttempt = { id: typeof event.message?.id === "string" ? event.message.id : void 0, open: true, slots: [] };
     updateTurnResponseModel(event.message?.model, c);
     if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model, c);
@@ -19180,7 +19133,10 @@ function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameT
     c.currentPiStream?.push({ type: "toolcall_start", contentIndex: idx, partial: c.turnOutput });
     c.currentPiStream?.push({ type: "toolcall_end", contentIndex: idx, toolCall: toolBlock, partial: c.turnOutput });
   }
-  if (assistantMsg.usage && c.turnOutput && c.currentPiStream) updateUsage(c.turnOutput, assistantMsg.usage, model, c);
+  if (Boolean(assistantMsg.usage) && Boolean(c.turnOutput) && Boolean(c.currentPiStream)) {
+    c.beginChildMessage(assistantMsg.id);
+    updateUsage(c.turnOutput, assistantMsg.usage, model, c);
+  }
   return sawToolUse;
 }
 function noteChildExecutedToolResults(message, c = ctx()) {
@@ -19263,7 +19219,7 @@ function renderNonStreamingReplacement(assistantMsg, model, customToolNameToPi, 
   const reyield = id === c.fallbackMessageId;
   if (!reyield) {
     discardAbandonedAttempt(c, "non-streaming-fallback", id);
-    c.replaceChildMessage(id);
+    c.beginChildMessage(id);
     c.fallbackMessageId = id;
     c.streamAttempt = null;
   }

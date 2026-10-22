@@ -235,12 +235,13 @@ export type ToolUseIdClaim =
 	| { outcome: "waiting" | "dead" | "answered" | "withdrawn" }
 	| { outcome: "other-tool"; recordedName: string };
 
-/** Token counters of one or more child messages; see `QueryContext.turnUsageCarry`. */
+/** Token counters for the latest underlying Claude request. */
 interface UsageCounters {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	cacheWrite1h?: number;
 	reasoning?: number;
 }
 
@@ -612,65 +613,17 @@ export class QueryContext {
 	 *  and an index is released as soon as another block starts there. */
 	childExecutedStreamIndexes = new Set<number>();
 
-	// Usage accounting for a Pi turn that spans SEVERAL child assistant messages.
-	//
-	// Every child message is a separate billed API call, and each reports its own
-	// counters — `message_start`/`message_delta` REPLACE rather than accumulate. A
-	// Pi turn that ends at its first tool call spans one child message, where
-	// replacing is right. A turn containing a child-executed connector call keeps
-	// running across the child's follow-up messages, so replacing would silently
-	// drop everything the earlier ones billed.
-	//
-	// So: `turnUsageCarry` holds the totals of the child messages already COMPLETE
-	// in this Pi turn, `currentMessageUsage` holds the one in flight, and the Pi
-	// message reports their sum. Summing is the correct model for input and cache
-	// too — each call bills its own.
-	// `reasoning` stays undefined until the child reports thinking tokens, so Pi
-	// can tell "no breakdown" from zero.
-	turnUsageCarry: UsageCounters = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	// Pi uses usage as context size, so only the latest child request counts.
 	currentMessageUsage: UsageCounters = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 	/** Anthropic id of the child message `currentMessageUsage` describes. */
 	currentMessageId: string | undefined;
 
-	/**
-	 * Declare which child message the following usage belongs to, banking the
-	 * previous one's counters into the turn total.
-	 *
-	 * Keyed on the MESSAGE ID rather than on the call site, because both paths
-	 * that see a message boundary can fire for the SAME message: `message_start`
-	 * arrives on the stream, and the SDK then yields that message again in
-	 * completed form. Banking per call site double-counted whenever the completed
-	 * copy took the no-stream-events branch — which it does whenever a message
-	 * produced no content blocks, since `turnSawStreamEvent` only tracks those.
-	 *
-	 * With no id on either side (older/streamless shapes) this degrades to
-	 * banking on every call, which is what each caller means when it cannot
-	 * prove otherwise.
-	 */
+	/** Reset counters for a new message; streamed and completed copies share an ID. */
 	beginChildMessage(messageId?: unknown): void {
 		const id = typeof messageId === "string" && messageId.length > 0 ? messageId : undefined;
 		if (id !== undefined && id === this.currentMessageId) return; // same message
-		this.turnUsageCarry.input += this.currentMessageUsage.input;
-		this.turnUsageCarry.output += this.currentMessageUsage.output;
-		this.turnUsageCarry.cacheRead += this.currentMessageUsage.cacheRead;
-		this.turnUsageCarry.cacheWrite += this.currentMessageUsage.cacheWrite;
-		if (this.currentMessageUsage.reasoning !== undefined) {
-			this.turnUsageCarry.reasoning = (this.turnUsageCarry.reasoning ?? 0) + this.currentMessageUsage.reasoning;
-		}
 		this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		this.currentMessageId = id;
-	}
-
-	/**
-	 * Declare that `messageId` REPLACES the in-flight child message instead of
-	 * following it: Claude Code retried an abandoned attempt. The abandoned
-	 * attempt's counters are dropped rather than banked. Pi reads the last
-	 * assistant message's input and cache figures as the context size, and
-	 * banking both attempts would double it.
-	 */
-	replaceChildMessage(messageId?: unknown): void {
-		this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-		this.currentMessageId = typeof messageId === "string" && messageId.length > 0 ? messageId : undefined;
 	}
 
 	// Per-turn (reset together)
@@ -753,9 +706,7 @@ export class QueryContext {
 			clearTimeout(this.scheduledToolUseEnd.timer);
 			this.scheduledToolUseEnd = null;
 		}
-		// Usage accounting IS per-Pi-message, so it resets with the message it
-		// describes — unlike tool-call tracking below.
-		this.turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		// A new Pi message starts with no child usage identity.
 		this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		this.currentMessageId = undefined;
 		// Tool-call tracking is NOT reset here — it persists across the
@@ -764,9 +715,9 @@ export class QueryContext {
 	}
 
 	/** Start another SDK query within the same live Pi request. Unlike
-	 * resetTurnState, keeps the accumulated Pi message and usage: deferred replay
-	 * can add several Claude replies before Pi's single terminal event. Per-query
-	 * flags reset so a streamless continuation is not mistaken for the prior reply. */
+	 * resetTurnState, keeps the displayed Pi content; the next Claude message
+	 * replaces usage. Per-query flags reset so a streamless continuation is not
+	 * mistaken for the prior reply. */
 	prepareContinuation(): void {
 		this.turnSawStreamEvent = false;
 		this.turnSawToolCall = false;

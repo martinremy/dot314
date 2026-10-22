@@ -14,6 +14,7 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 - Adapted nicobailon's checks for copied Pi files and external transcript writes. Copied or unproven Pi session files rebuild into separate Claude transcripts, and ordinary restoration still rejects another Pi session ID. Native assistant checkpoints detect appended conversation turns before reuse or replacement, including when a rebuild is already pending. Changed or unreadable sources remain intact while the bridge rebuilds from verified history.
 
+- Adapted nicobailon's reporting of the latest request's usage and one-hour cache writes. Internal Claude requests and deferred continuations no longer add repeated context sizes to Pi's compaction and overflow checks. Reasoning and one-hour writes remain subsets, and their displayed breakdowns clear when the next message omits them. Pi's token totals exclude those earlier internal requests.
 - Adapted nicobailon's rejected-limit cause retention and warning deduplication. An unmanaged quota rejection remains authoritative after transport errors or idle termination, while successful recovery, cancellation and usage-credit policy retain their own outcomes. Warnings are scoped to the account and UI recipient; duplicate toasts no longer suppress per-request rate-limit events.
 
 ## 2026-10-12

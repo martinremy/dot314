@@ -2,6 +2,8 @@
 // of the Pi stream on every emission path while remaining observable to audit.
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { isContextOverflow } from "@earendil-works/pi-ai";
+import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, shouldCompact } from "@earendil-works/pi-coding-agent";
 import { noteChildExecutedToolResults, processAssistantMessage, processStreamEvent } from "../src/index.ts";
 import { isChildExecutedTool, isChildInternalTool, isConnectorTool } from "../src/connectors.ts";
 import { QueryContext, ctx, resetStack } from "../src/query-state.ts";
@@ -456,7 +458,7 @@ describe("child-executed tools are never mirrored as Pi tool calls", () => {
 describe("usage across a Pi turn that spans several child messages", () => {
 	beforeEach(() => resetStack());
 
-	it("accumulates what each finished child message billed", () => {
+	it("uses the latest child request for Pi's compaction and overflow decisions", () => {
 		const c = ctx();
 		c.resetTurnState(model);
 		installFakeStream();
@@ -475,11 +477,20 @@ describe("usage across a Pi turn that spans several child messages", () => {
 		}), new Map(), model);
 		processStreamEvent(streamEvent({ type: "message_delta", delta: {}, usage: { output_tokens: 110 } }), new Map(), model);
 
-		assert.equal(c.turnOutput.usage.input, 15, "both calls' input is billed");
-		assert.equal(c.turnOutput.usage.output, 113);
-		assert.equal(c.turnOutput.usage.cacheRead, 53631);
-		assert.equal(c.turnOutput.usage.cacheWrite, 57768, "the first message's cache write must not be dropped");
-		assert.equal(c.turnOutput.usage.totalTokens, 15 + 113 + 53631 + 57768);
+		processStreamEvent(streamEvent({
+			type: "message_start",
+			message: { id: "msg_3", model: model.id, usage: { input_tokens: 6, output_tokens: 120, cache_read_input_tokens: 54000, cache_creation_input_tokens: 2100 } },
+		}), new Map(), model);
+
+		assert.equal(c.turnOutput.usage.input, 6);
+		assert.equal(c.turnOutput.usage.output, 120);
+		assert.equal(c.turnOutput.usage.cacheRead, 54000);
+		assert.equal(c.turnOutput.usage.cacheWrite, 2100);
+		assert.equal(c.turnOutput.usage.totalTokens, 6 + 120 + 54000 + 2100);
+		const tokens = calculateContextTokens(c.turnOutput.usage);
+		assert.equal(tokens, 56226);
+		assert.equal(shouldCompact(tokens, 100000, DEFAULT_COMPACTION_SETTINGS), false);
+		assert.equal(isContextOverflow(c.turnOutput, 100000), false);
 	});
 
 	it("replaces rather than doubles within one child message", () => {
@@ -499,7 +510,7 @@ describe("usage across a Pi turn that spans several child messages", () => {
 		assert.equal(c.turnOutput.usage.output, 90, "cumulative-per-message counters must not be summed");
 	});
 
-	it("reports thinking tokens as reasoning without adding them to the total", () => {
+	it("reports reasoning and one-hour writes as subsets and clears absent breakdowns", () => {
 		const c = ctx();
 		c.resetTurnState(model);
 		installFakeStream();
@@ -512,19 +523,25 @@ describe("usage across a Pi turn that spans several child messages", () => {
 		processStreamEvent(streamEvent({ type: "message_delta", delta: {}, usage: { output_tokens: 50, output_tokens_details: { thinking_tokens: 20 } } }), new Map(), model);
 		processStreamEvent(streamEvent({
 			type: "message_start",
-			message: { id: "msg_2", model: model.id, usage: { input_tokens: 5, output_tokens: 0 } },
+			message: { id: "msg_2", model: model.id, usage: { input_tokens: 5, output_tokens: 0, cache_creation_input_tokens: 20, cache_creation: { ephemeral_1h_input_tokens: 12 } } },
 		}), new Map(), model);
 		processStreamEvent(streamEvent({ type: "message_delta", delta: {}, usage: { output_tokens: 9, output_tokens_details: { thinking_tokens: 4 } } }), new Map(), model);
 
-		assert.equal(c.turnOutput.usage.reasoning, 24, "replaced within a message, summed across messages");
-		assert.equal(c.turnOutput.usage.output, 59);
-		assert.equal(c.turnOutput.usage.totalTokens, 15 + 59, "reasoning is a subset of output");
+		assert.equal(c.turnOutput.usage.reasoning, 4);
+		assert.equal(c.turnOutput.usage.cacheWrite1h, 12);
+		assert.equal(c.turnOutput.usage.cacheWrite, 20);
+		assert.equal(c.turnOutput.usage.output, 9);
+		assert.equal(c.turnOutput.usage.totalTokens, 5 + 9 + 20);
+		processStreamEvent(streamEvent({
+			type: "message_start",
+			message: { id: "msg_3", model: model.id, usage: { input_tokens: 6, output_tokens: 3 } },
+		}), new Map(), model);
+		assert.equal(c.turnOutput.usage.reasoning, undefined);
+		assert.equal(c.turnOutput.usage.cacheWrite1h, undefined);
+		assert.equal(c.turnOutput.usage.totalTokens, 9);
 	});
 
-	it("accumulates on the no-stream-events path too", () => {
-		// The SDK can deliver a turn as complete `assistant` messages with no
-		// stream events. That path begins the following child message, so
-		// it must bank the previous one exactly as `message_start` does.
+	it("replaces usage on the no-stream-events path too", () => {
 		const c = ctx();
 		c.resetTurnState(model);
 		installFakeStream();
@@ -538,8 +555,8 @@ describe("usage across a Pi turn that spans several child messages", () => {
 			message: { id: "msg_2", content: [{ type: "text", text: "second" }], usage: { input_tokens: 5, output_tokens: 7 } },
 		}, model, new Map());
 
-		assert.equal(c.turnOutput.usage.input, 15);
-		assert.equal(c.turnOutput.usage.output, 27, "the first assistant message's output must not be dropped");
+		assert.equal(c.turnOutput.usage.input, 5);
+		assert.equal(c.turnOutput.usage.output, 7);
 	});
 
 	it("does not double-count a message whose message_start already streamed", () => {
@@ -566,8 +583,30 @@ describe("usage across a Pi turn that spans several child messages", () => {
 		assert.equal(c.turnOutput.usage.output, 40);
 	});
 
-	it("still accumulates when the SDK reports no message ids", () => {
-		// Older/streamless shapes carry no id. Each call then means what it says.
+	it("resets usage when a completed child message follows a streamed internal-tool message", () => {
+		const c = ctx();
+		c.resetTurnState(model);
+		installFakeStream();
+		processStreamEvent(streamEvent({
+			type: "message_start",
+			message: { id: "msg_streamed", usage: { input_tokens: 10, cache_read_input_tokens: 60000 } },
+		}), new Map(), model);
+		processStreamEvent(streamEvent({
+			type: "content_block_start", index: 0,
+			content_block: { type: "tool_use", id: "search", name: "ToolSearch", input: {} },
+		}), new Map(), model);
+		processStreamEvent(streamEvent({ type: "content_block_stop", index: 0 }), new Map(), model);
+		processStreamEvent(streamEvent({ type: "message_delta", delta: {}, usage: { output_tokens: 3 } }), new Map(), model);
+		processStreamEvent(streamEvent({ type: "message_stop" }), new Map(), model);
+		processAssistantMessage({
+			type: "assistant",
+			message: { id: "msg_completed", content: [], usage: { input_tokens: 5, output_tokens: 7 } },
+		}, model, new Map());
+		assert.equal(c.turnOutput.usage.cacheRead, 0);
+		assert.equal(c.turnOutput.usage.totalTokens, 12);
+	});
+
+	it("uses the latest counters when the SDK reports no message ids", () => {
 		const c = ctx();
 		c.resetTurnState(model);
 		installFakeStream();
@@ -581,8 +620,8 @@ describe("usage across a Pi turn that spans several child messages", () => {
 			message: { content: [{ type: "text", text: "b" }], usage: { input_tokens: 3, output_tokens: 4 } },
 		}, model, new Map());
 
-		assert.equal(c.turnOutput.usage.input, 6);
-		assert.equal(c.turnOutput.usage.output, 8);
+		assert.equal(c.turnOutput.usage.input, 3);
+		assert.equal(c.turnOutput.usage.output, 4);
 	});
 
 	it("starts fresh for the next Pi message", () => {

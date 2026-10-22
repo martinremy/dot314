@@ -18,16 +18,13 @@ type SdkUsage = {
 	output_tokens?: number | null;
 	cache_read_input_tokens?: number | null;
 	cache_creation_input_tokens?: number | null;
+	cache_creation?: { ephemeral_1h_input_tokens?: number | null } | null;
 	output_tokens_details?: { thinking_tokens?: number | null } | null;
 };
 
 function updateUsage(output: AssistantMessage, usage: SdkUsage, model: Model<any>, c: QueryContext): void {
-	// Anthropic reports per-message counters and RE-reports them as the message
-	// grows, so the in-flight message's figures replace, never accumulate. What
-	// accumulates is every child message already finished in this Pi turn — see
-	// `turnUsageCarry` in query-state.ts for why a turn can span several.
+	// Anthropic re-reports counters as one message grows; each field replaces its prior value.
 	const current = c.currentMessageUsage;
-	const carry = c.turnUsageCarry;
 	if (usage.input_tokens != null) current.input = usage.input_tokens;
 	if (usage.output_tokens != null) current.output = usage.output_tokens;
 	if (usage.cache_read_input_tokens != null) current.cacheRead = usage.cache_read_input_tokens;
@@ -36,13 +33,16 @@ function updateUsage(output: AssistantMessage, usage: SdkUsage, model: Model<any
 	// added to the total or cost.
 	const thinking = usage.output_tokens_details?.thinking_tokens;
 	if (thinking != null) current.reasoning = thinking;
-	output.usage.input = carry.input + current.input;
-	output.usage.output = carry.output + current.output;
-	output.usage.cacheRead = carry.cacheRead + current.cacheRead;
-	output.usage.cacheWrite = carry.cacheWrite + current.cacheWrite;
-	if (carry.reasoning !== undefined || current.reasoning !== undefined) {
-		output.usage.reasoning = (carry.reasoning ?? 0) + (current.reasoning ?? 0);
-	}
+	const cacheWrite1h = Boolean(usage.cache_creation) ? usage.cache_creation.ephemeral_1h_input_tokens : undefined;
+	if (Number.isFinite(cacheWrite1h)) current.cacheWrite1h = cacheWrite1h;
+	output.usage.input = current.input;
+	output.usage.output = current.output;
+	output.usage.cacheRead = current.cacheRead;
+	output.usage.cacheWrite = current.cacheWrite;
+	if ("reasoning" in current) output.usage.reasoning = current.reasoning;
+	else delete output.usage.reasoning;
+	if ("cacheWrite1h" in current) output.usage.cacheWrite1h = current.cacheWrite1h;
+	else delete output.usage.cacheWrite1h;
 	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 	calculateCost(model, output.usage);
 	if (!DEBUG) return;
@@ -855,12 +855,7 @@ export function processStreamEvent(
 		// handler (see reapStaleQueuedResults).
 		reapStaleQueuedResults(c);
 		c.resetToolTracking();
-		// Another child message begins: bank what the previous one billed before
-		// its counters are replaced. No-op on the turn's first, and no-op if this
-		// same message was already declared (see beginChildMessage). A retry
-		// replaces the abandoned attempt instead of following it.
-		if (retry) c.replaceChildMessage(event.message?.id);
-		else c.beginChildMessage(event.message?.id);
+		c.beginChildMessage(event.message?.id);
 		c.streamAttempt = { id: typeof event.message?.id === "string" ? event.message.id : undefined, open: true, slots: [] };
 		updateTurnResponseModel(event.message?.model, c);
 		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model, c);
@@ -1035,7 +1030,7 @@ export function processStreamEvent(
 // the same stream lifecycle as processStreamEvent — including ending the stream on
 // tool_use to prevent deadlock with the MCP handler.
 function appendMissingToolUsesFromAssistant(
-	assistantMsg: { content?: Array<any>; usage?: Record<string, number | undefined> },
+	assistantMsg: { id?: string; content?: Array<any>; usage?: SdkUsage },
 	model: Model<any>,
 	customToolNameToPi: Map<string, string>,
 	c: QueryContext,
@@ -1104,7 +1099,10 @@ function appendMissingToolUsesFromAssistant(
 	// message_start placeholder usage, and once the done event has delivered
 	// turnOutput to pi, overwriting its usage with those placeholders would
 	// corrupt the very figure message_delta got right.
-	if (assistantMsg.usage && c.turnOutput && c.currentPiStream) updateUsage(c.turnOutput, assistantMsg.usage, model, c);
+	if (Boolean(assistantMsg.usage) && Boolean(c.turnOutput) && Boolean(c.currentPiStream)) {
+		c.beginChildMessage(assistantMsg.id);
+		updateUsage(c.turnOutput, assistantMsg.usage, model, c);
+	}
 	return sawToolUse;
 }
 
@@ -1240,7 +1238,7 @@ function renderNonStreamingReplacement(assistantMsg: any, model: Model<any>, cus
 	const reyield = id === c.fallbackMessageId;
 	if (!reyield) {
 		discardAbandonedAttempt(c, "non-streaming-fallback", id);
-		c.replaceChildMessage(id);
+		c.beginChildMessage(id);
 		c.fallbackMessageId = id;
 		c.streamAttempt = null;
 	}

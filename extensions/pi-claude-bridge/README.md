@@ -174,6 +174,8 @@ Tool-result integrity problems add a metadata-only `claude-bridge-integrity` ent
 
 Rate-limit warnings appear once per account and Pi interface for each status and limit type until the reported reset time changes. A rejected allowance remains the cause of a later connection error or idle timeout, so Pi treats it as a nonretryable quota error. Claude Code can still recover and complete the request successfully. Cancellation and the usage-credit policy take precedence.
 
+Pi's token usage describes the latest Claude request's context, including cache reads and writes. If Claude makes several requests for internal tools or a deferred message within one Pi response, earlier requests are excluded from these counters. The totals therefore do not measure complete subscription consumption. Reasoning tokens are part of output, and one-hour cache writes are part of cache writes; neither is counted twice.
+
 Maintainer notes and the test suites are in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Differences from Kendex upstream
