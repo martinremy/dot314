@@ -9,11 +9,12 @@ var __export = (target, all) => {
 import {
   getCurrentSystemMessage,
   getCurrentSystemPrompt,
-  getCurrentTools
+  getCurrentTools,
+  isRetryableAssistantError
 } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 
-// node_modules/change-case/dist/index.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/change-case/dist/index.js
 var SPLIT_LOWER_UPPER_RE = new RegExp("([\\p{Ll}\\d])(\\p{Lu})", "gu");
 var SPLIT_UPPER_UPPER_RE = new RegExp("(\\p{Lu})([\\p{Lu}][\\p{Ll}])", "gu");
 var SPLIT_SEPARATE_NUMBER_RE = new RegExp("(\\d)\\p{Ll}|(\\p{L})\\d", "u");
@@ -1914,6 +1915,10 @@ var QueryContext = class {
    *  query died on "Prompt is too long" and Pi compacted), which no query
    *  will continue, so it restarts the turn on the new history. */
   historyReplacedAfterQuery = false;
+  /** Completed results being answered on the current Pi response stream. */
+  callbackResultIds = /* @__PURE__ */ new Set();
+  /** One-use authorization for Pi to retry a failed reply, never persisted. */
+  failedCallback = null;
   reportedHistoryRestartDecline = false;
   restartRequest = null;
   latestCursor = 0;
@@ -2634,24 +2639,24 @@ function contextToolCallIds(messages) {
   return ids;
 }
 function handedToPi(queryCtx, ids) {
-  return ids.some((id) => queryCtx.forwardedToolCallIds.has(id));
+  return ids.some((id) => queryCtx.forwardedToolCallIds.has(id) || Boolean(queryCtx.failedCallback) && queryCtx.failedCallback.toolCallIds.has(id));
 }
-function requestLaneFor(sessionId, messages, otherConversation = () => false) {
+function requestLaneFor(sessionId, messages, disposition, otherConversation = () => false) {
   const own = peekQueryContext(sessionId);
-  const callback = callbackLane(sessionId, messages);
+  const callback = callbackLane(sessionId, messages, disposition === "one-shot" ? "forks" : "all");
   if (callback !== null) return callback;
-  const reason = contextInUse(own) ? "its lane is busy" : messages[lastConversationIndex(messages)]?.role === "toolResult" ? "its tool result answers no call of its lane" : otherConversation(sessionId) ? "its lane holds another conversation" : void 0;
+  const reason = disposition === "one-shot" ? "the request is a one-shot" : contextInUse(own) ? "its lane is busy" : messages[lastConversationIndex(messages)]?.role === "toolResult" ? "its tool result answers no call of its lane" : otherConversation(sessionId) ? "its lane holds another conversation" : void 0;
   if (reason === void 0) return sessionId;
   const forkId = `${FORK_LANE_PREFIX}${randomUUID()}`;
   forkLaneStore().set(forkId, { base: sessionId });
   debug(`provider: request (session ${sessionId === void 0 ? "none" : sessionId.slice(0, 8)}) is not its lane's callback and ${reason}; running it as its own query in ${forkId}`);
   return forkId;
 }
-function callbackLane(sessionId, messages) {
+function callbackLane(sessionId, messages, scope) {
   const ids = contextToolCallIds(messages);
   if (ids.length === 0) return null;
   const own = peekQueryContext(sessionId);
-  if (own && handedToPi(own, ids)) return sessionId;
+  if (scope === "all" && Boolean(own) && handedToPi(own, ids)) return sessionId;
   for (const [forkId, fork] of forkLaneStore()) {
     if (fork.base !== sessionId) continue;
     const forkCtx = peekQueryContext(forkId);
@@ -2660,7 +2665,7 @@ function callbackLane(sessionId, messages) {
   return null;
 }
 function idleForHostResume(sessionId, messages) {
-  return !contextInUse(peekQueryContext(sessionId)) && callbackLane(sessionId, messages) === null;
+  return !contextInUse(peekQueryContext(sessionId)) && callbackLane(sessionId, messages, "all") === null;
 }
 function piSessionOfLane(laneId) {
   const fork = laneId === void 0 ? void 0 : forkLaneStore().get(laneId);
@@ -3061,7 +3066,8 @@ var REBUILD_MARKS = [
   "tool-results-outstanding",
   "orphan-unverified",
   "host-resumed",
-  "inherited"
+  "inherited",
+  "failed-reply-retry"
 ];
 var SHARED_SESSION_LANES_SYMBOL = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.shared-session-lanes.v1");
 function sharedSessionLaneStore() {
@@ -4552,7 +4558,7 @@ function hasClaudeCredentials(env = process.env, platform = osPlatform()) {
 import { homedir as homedir3 } from "node:os";
 import { join as join5 } from "node:path";
 
-// node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 import { createRequire as xV } from "node:module";
 import { randomUUID as Fl } from "crypto";
 import { createHash as kV, randomBytes as w$e } from "crypto";
@@ -32296,7 +32302,7 @@ function buildNativeProvider(piAi2, models, streamSimple, env = process.env, has
   });
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
   $brand: () => $brand,
@@ -32539,7 +32545,7 @@ __export(external_exports, {
   xor: () => xor
 });
 
-// node_modules/zod/v4/core/index.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/index.js
 var core_exports2 = {};
 __export(core_exports2, {
   $ZodAny: () => $ZodAny,
@@ -32818,7 +32824,7 @@ __export(core_exports2, {
   version: () => version
 });
 
-// node_modules/zod/v4/core/core.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/core.js
 var _a2;
 var NEVER = /* @__PURE__ */ Object.freeze({
   status: "aborted"
@@ -32895,7 +32901,7 @@ function config(newConfig) {
   return globalConfig;
 }
 
-// node_modules/zod/v4/core/util.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/util.js
 var util_exports = {};
 __export(util_exports, {
   BIGINT_FORMAT_RANGES: () => BIGINT_FORMAT_RANGES,
@@ -33591,7 +33597,7 @@ var Class = class {
   }
 };
 
-// node_modules/zod/v4/core/errors.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/errors.js
 var initializer = (inst, def) => {
   inst.name = "$ZodError";
   Object.defineProperty(inst, "_zod", {
@@ -33730,7 +33736,7 @@ function prettifyError(error51) {
   return lines.join("\n");
 }
 
-// node_modules/zod/v4/core/parse.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/parse.js
 var _parse = (_Err) => (schema2, value, _ctx, _params) => {
   const ctx2 = _ctx ? { ..._ctx, async: false } : { async: false };
   const result = schema2._zod.run({ value, issues: [] }, ctx2);
@@ -33818,7 +33824,7 @@ var _safeDecodeAsync = (_Err) => async (schema2, value, _ctx) => {
 };
 var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
 
-// node_modules/zod/v4/core/regexes.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/regexes.js
 var regexes_exports = {};
 __export(regexes_exports, {
   base64: () => base64,
@@ -33977,7 +33983,7 @@ var sha512_hex = /^[0-9a-fA-F]{128}$/;
 var sha512_base64 = /* @__PURE__ */ fixedBase64(86, "==");
 var sha512_base64url = /* @__PURE__ */ fixedBase64url(86);
 
-// node_modules/zod/v4/core/checks.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/checks.js
 var $ZodCheck = /* @__PURE__ */ $constructor("$ZodCheck", (inst, def) => {
   var _a4;
   inst._zod ?? (inst._zod = {});
@@ -34525,7 +34531,7 @@ var $ZodCheckOverwrite = /* @__PURE__ */ $constructor("$ZodCheckOverwrite", (ins
   };
 });
 
-// node_modules/zod/v4/core/doc.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/doc.js
 var Doc = class {
   constructor(args = []) {
     this.content = [];
@@ -34561,14 +34567,14 @@ var Doc = class {
   }
 };
 
-// node_modules/zod/v4/core/versions.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/versions.js
 var version = {
   major: 4,
   minor: 4,
   patch: 3
 };
 
-// node_modules/zod/v4/core/schemas.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/schemas.js
 var $ZodType = /* @__PURE__ */ $constructor("$ZodType", (inst, def) => {
   var _a4;
   inst ?? (inst = {});
@@ -36661,7 +36667,7 @@ function handleRefineResult(result, payload, input, inst) {
   }
 }
 
-// node_modules/zod/v4/locales/index.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/index.js
 var locales_exports = {};
 __export(locales_exports, {
   ar: () => ar_default,
@@ -36718,7 +36724,7 @@ __export(locales_exports, {
   zhTW: () => zh_TW_default
 });
 
-// node_modules/zod/v4/locales/ar.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ar.js
 var error = () => {
   const Sizable = {
     string: { unit: "\u062D\u0631\u0641", verb: "\u0623\u0646 \u064A\u062D\u0648\u064A" },
@@ -36825,7 +36831,7 @@ function ar_default() {
   };
 }
 
-// node_modules/zod/v4/locales/az.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/az.js
 var error2 = () => {
   const Sizable = {
     string: { unit: "simvol", verb: "olmal\u0131d\u0131r" },
@@ -36931,7 +36937,7 @@ function az_default() {
   };
 }
 
-// node_modules/zod/v4/locales/be.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/be.js
 function getBelarusianPlural(count, one2, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -37088,7 +37094,7 @@ function be_default() {
   };
 }
 
-// node_modules/zod/v4/locales/bg.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/bg.js
 var error4 = () => {
   const Sizable = {
     string: { unit: "\u0441\u0438\u043C\u0432\u043E\u043B\u0430", verb: "\u0434\u0430 \u0441\u044A\u0434\u044A\u0440\u0436\u0430" },
@@ -37209,7 +37215,7 @@ function bg_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ca.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ca.js
 var error5 = () => {
   const Sizable = {
     string: { unit: "car\xE0cters", verb: "contenir" },
@@ -37318,7 +37324,7 @@ function ca_default() {
   };
 }
 
-// node_modules/zod/v4/locales/cs.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/cs.js
 var error6 = () => {
   const Sizable = {
     string: { unit: "znak\u016F", verb: "m\xEDt" },
@@ -37430,7 +37436,7 @@ function cs_default() {
   };
 }
 
-// node_modules/zod/v4/locales/da.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/da.js
 var error7 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "havde" },
@@ -37546,7 +37552,7 @@ function da_default() {
   };
 }
 
-// node_modules/zod/v4/locales/de.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/de.js
 var error8 = () => {
   const Sizable = {
     string: { unit: "Zeichen", verb: "zu haben" },
@@ -37655,7 +37661,7 @@ function de_default() {
   };
 }
 
-// node_modules/zod/v4/locales/el.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/el.js
 var error9 = () => {
   const Sizable = {
     string: { unit: "\u03C7\u03B1\u03C1\u03B1\u03BA\u03C4\u03AE\u03C1\u03B5\u03C2", verb: "\u03BD\u03B1 \u03AD\u03C7\u03B5\u03B9" },
@@ -37765,7 +37771,7 @@ function el_default() {
   };
 }
 
-// node_modules/zod/v4/locales/en.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/en.js
 var error10 = () => {
   const Sizable = {
     string: { unit: "characters", verb: "to have" },
@@ -37878,7 +37884,7 @@ function en_default() {
   };
 }
 
-// node_modules/zod/v4/locales/eo.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/eo.js
 var error11 = () => {
   const Sizable = {
     string: { unit: "karaktrojn", verb: "havi" },
@@ -37988,7 +37994,7 @@ function eo_default() {
   };
 }
 
-// node_modules/zod/v4/locales/es.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/es.js
 var error12 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "tener" },
@@ -38121,7 +38127,7 @@ function es_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fa.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/fa.js
 var error13 = () => {
   const Sizable = {
     string: { unit: "\u06A9\u0627\u0631\u0627\u06A9\u062A\u0631", verb: "\u062F\u0627\u0634\u062A\u0647 \u0628\u0627\u0634\u062F" },
@@ -38236,7 +38242,7 @@ function fa_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fi.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/fi.js
 var error14 = () => {
   const Sizable = {
     string: { unit: "merkki\xE4", subject: "merkkijonon" },
@@ -38349,7 +38355,7 @@ function fi_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fr.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/fr.js
 var error15 = () => {
   const Sizable = {
     string: { unit: "caract\xE8res", verb: "avoir" },
@@ -38475,7 +38481,7 @@ function fr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fr-CA.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/fr-CA.js
 var error16 = () => {
   const Sizable = {
     string: { unit: "caract\xE8res", verb: "avoir" },
@@ -38583,7 +38589,7 @@ function fr_CA_default() {
   };
 }
 
-// node_modules/zod/v4/locales/he.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/he.js
 var error17 = () => {
   const TypeNames = {
     string: { label: "\u05DE\u05D7\u05E8\u05D5\u05D6\u05EA", gender: "f" },
@@ -38778,7 +38784,7 @@ function he_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hr.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/hr.js
 var error18 = () => {
   const Sizable = {
     string: { unit: "znakova", verb: "imati" },
@@ -38901,7 +38907,7 @@ function hr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hu.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/hu.js
 var error19 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "legyen" },
@@ -39010,7 +39016,7 @@ function hu_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hy.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/hy.js
 function getArmenianPlural(count, one2, many) {
   return Math.abs(count) === 1 ? one2 : many;
 }
@@ -39158,7 +39164,7 @@ function hy_default() {
   };
 }
 
-// node_modules/zod/v4/locales/id.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/id.js
 var error21 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "memiliki" },
@@ -39265,7 +39271,7 @@ function id_default() {
   };
 }
 
-// node_modules/zod/v4/locales/is.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/is.js
 var error22 = () => {
   const Sizable = {
     string: { unit: "stafi", verb: "a\xF0 hafa" },
@@ -39375,7 +39381,7 @@ function is_default() {
   };
 }
 
-// node_modules/zod/v4/locales/it.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/it.js
 var error23 = () => {
   const Sizable = {
     string: { unit: "caratteri", verb: "avere" },
@@ -39484,7 +39490,7 @@ function it_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ja.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ja.js
 var error24 = () => {
   const Sizable = {
     string: { unit: "\u6587\u5B57", verb: "\u3067\u3042\u308B" },
@@ -39592,7 +39598,7 @@ function ja_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ka.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ka.js
 var error25 = () => {
   const Sizable = {
     string: { unit: "\u10E1\u10D8\u10DB\u10D1\u10DD\u10DA\u10DD", verb: "\u10E3\u10DC\u10D3\u10D0 \u10E8\u10D4\u10D8\u10EA\u10D0\u10D5\u10D3\u10D4\u10E1" },
@@ -39705,7 +39711,7 @@ function ka_default() {
   };
 }
 
-// node_modules/zod/v4/locales/km.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/km.js
 var error26 = () => {
   const Sizable = {
     string: { unit: "\u178F\u17BD\u17A2\u1780\u17D2\u179F\u179A", verb: "\u1782\u17BD\u179A\u1798\u17B6\u1793" },
@@ -39816,12 +39822,12 @@ function km_default() {
   };
 }
 
-// node_modules/zod/v4/locales/kh.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/kh.js
 function kh_default() {
   return km_default();
 }
 
-// node_modules/zod/v4/locales/ko.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ko.js
 var error27 = () => {
   const Sizable = {
     string: { unit: "\uBB38\uC790", verb: "to have" },
@@ -39933,7 +39939,7 @@ function ko_default() {
   };
 }
 
-// node_modules/zod/v4/locales/lt.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/lt.js
 var capitalizeFirstCharacter = (text) => {
   return text.charAt(0).toUpperCase() + text.slice(1);
 };
@@ -40137,7 +40143,7 @@ function lt_default() {
   };
 }
 
-// node_modules/zod/v4/locales/mk.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/mk.js
 var error29 = () => {
   const Sizable = {
     string: { unit: "\u0437\u043D\u0430\u0446\u0438", verb: "\u0434\u0430 \u0438\u043C\u0430\u0430\u0442" },
@@ -40247,7 +40253,7 @@ function mk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ms.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ms.js
 var error30 = () => {
   const Sizable = {
     string: { unit: "aksara", verb: "mempunyai" },
@@ -40355,7 +40361,7 @@ function ms_default() {
   };
 }
 
-// node_modules/zod/v4/locales/nl.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/nl.js
 var error31 = () => {
   const Sizable = {
     string: { unit: "tekens", verb: "heeft" },
@@ -40466,7 +40472,7 @@ function nl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/no.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/no.js
 var error32 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "\xE5 ha" },
@@ -40575,7 +40581,7 @@ function no_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ota.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ota.js
 var error33 = () => {
   const Sizable = {
     string: { unit: "harf", verb: "olmal\u0131d\u0131r" },
@@ -40685,7 +40691,7 @@ function ota_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ps.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ps.js
 var error34 = () => {
   const Sizable = {
     string: { unit: "\u062A\u0648\u06A9\u064A", verb: "\u0648\u0644\u0631\u064A" },
@@ -40800,7 +40806,7 @@ function ps_default() {
   };
 }
 
-// node_modules/zod/v4/locales/pl.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/pl.js
 var error35 = () => {
   const Sizable = {
     string: { unit: "znak\xF3w", verb: "mie\u0107" },
@@ -40910,7 +40916,7 @@ function pl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/pt.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/pt.js
 var error36 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "ter" },
@@ -41019,7 +41025,7 @@ function pt_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ro.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ro.js
 var error37 = () => {
   const Sizable = {
     string: { unit: "caractere", verb: "s\u0103 aib\u0103" },
@@ -41139,7 +41145,7 @@ function ro_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ru.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ru.js
 function getRussianPlural(count, one2, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -41296,7 +41302,7 @@ function ru_default() {
   };
 }
 
-// node_modules/zod/v4/locales/sl.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/sl.js
 var error39 = () => {
   const Sizable = {
     string: { unit: "znakov", verb: "imeti" },
@@ -41406,7 +41412,7 @@ function sl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/sv.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/sv.js
 var error40 = () => {
   const Sizable = {
     string: { unit: "tecken", verb: "att ha" },
@@ -41517,7 +41523,7 @@ function sv_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ta.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ta.js
 var error41 = () => {
   const Sizable = {
     string: { unit: "\u0B8E\u0BB4\u0BC1\u0BA4\u0BCD\u0BA4\u0BC1\u0B95\u0BCD\u0B95\u0BB3\u0BCD", verb: "\u0B95\u0BCA\u0BA3\u0BCD\u0B9F\u0BBF\u0BB0\u0BC1\u0B95\u0BCD\u0B95 \u0BB5\u0BC7\u0BA3\u0BCD\u0B9F\u0BC1\u0BAE\u0BCD" },
@@ -41628,7 +41634,7 @@ function ta_default() {
   };
 }
 
-// node_modules/zod/v4/locales/th.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/th.js
 var error42 = () => {
   const Sizable = {
     string: { unit: "\u0E15\u0E31\u0E27\u0E2D\u0E31\u0E01\u0E29\u0E23", verb: "\u0E04\u0E27\u0E23\u0E21\u0E35" },
@@ -41739,7 +41745,7 @@ function th_default() {
   };
 }
 
-// node_modules/zod/v4/locales/tr.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/tr.js
 var error43 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "olmal\u0131" },
@@ -41845,7 +41851,7 @@ function tr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/uk.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/uk.js
 var error44 = () => {
   const Sizable = {
     string: { unit: "\u0441\u0438\u043C\u0432\u043E\u043B\u0456\u0432", verb: "\u043C\u0430\u0442\u0438\u043C\u0435" },
@@ -41954,12 +41960,12 @@ function uk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ua.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ua.js
 function ua_default() {
   return uk_default();
 }
 
-// node_modules/zod/v4/locales/ur.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/ur.js
 var error45 = () => {
   const Sizable = {
     string: { unit: "\u062D\u0631\u0648\u0641", verb: "\u06C1\u0648\u0646\u0627" },
@@ -42070,7 +42076,7 @@ function ur_default() {
   };
 }
 
-// node_modules/zod/v4/locales/uz.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/uz.js
 var error46 = () => {
   const Sizable = {
     string: { unit: "belgi", verb: "bo\u2018lishi kerak" },
@@ -42181,7 +42187,7 @@ function uz_default() {
   };
 }
 
-// node_modules/zod/v4/locales/vi.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/vi.js
 var error47 = () => {
   const Sizable = {
     string: { unit: "k\xFD t\u1EF1", verb: "c\xF3" },
@@ -42290,7 +42296,7 @@ function vi_default() {
   };
 }
 
-// node_modules/zod/v4/locales/zh-CN.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/zh-CN.js
 var error48 = () => {
   const Sizable = {
     string: { unit: "\u5B57\u7B26", verb: "\u5305\u542B" },
@@ -42400,7 +42406,7 @@ function zh_CN_default() {
   };
 }
 
-// node_modules/zod/v4/locales/zh-TW.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/zh-TW.js
 var error49 = () => {
   const Sizable = {
     string: { unit: "\u5B57\u5143", verb: "\u64C1\u6709" },
@@ -42508,7 +42514,7 @@ function zh_TW_default() {
   };
 }
 
-// node_modules/zod/v4/locales/yo.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/locales/yo.js
 var error50 = () => {
   const Sizable = {
     string: { unit: "\xE0mi", verb: "n\xED" },
@@ -42616,7 +42622,7 @@ function yo_default() {
   };
 }
 
-// node_modules/zod/v4/core/registries.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/registries.js
 var _a3;
 var $output = /* @__PURE__ */ Symbol("ZodOutput");
 var $input = /* @__PURE__ */ Symbol("ZodInput");
@@ -42666,7 +42672,7 @@ function registry() {
 (_a3 = globalThis).__zod_globalRegistry ?? (_a3.__zod_globalRegistry = registry());
 var globalRegistry = globalThis.__zod_globalRegistry;
 
-// node_modules/zod/v4/core/api.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/api.js
 // @__NO_SIDE_EFFECTS__
 function _string(Class2, params) {
   return new Class2({
@@ -43705,7 +43711,7 @@ function _stringFormat(Class2, format, fnOrRegex, _params = {}) {
   return inst;
 }
 
-// node_modules/zod/v4/core/to-json-schema.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/to-json-schema.js
 function initializeContext(params) {
   let target = params?.target ?? "draft-2020-12";
   if (target === "draft-4")
@@ -44064,7 +44070,7 @@ var createStandardJSONSchemaMethod = (schema2, io2, processors = {}) => (params)
   return finalize(ctx2, schema2);
 };
 
-// node_modules/zod/v4/core/json-schema-processors.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/json-schema-processors.js
 var formatMap = {
   guid: "uuid",
   url: "uri",
@@ -44608,7 +44614,7 @@ function toJSONSchema(input, params) {
   return finalize(ctx2, input);
 }
 
-// node_modules/zod/v4/core/json-schema-generator.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/json-schema-generator.js
 var JSONSchemaGenerator = class {
   /** @deprecated Access via ctx instead */
   get metadataRegistry() {
@@ -44683,10 +44689,10 @@ var JSONSchemaGenerator = class {
   }
 };
 
-// node_modules/zod/v4/core/json-schema.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/core/json-schema.js
 var json_schema_exports = {};
 
-// node_modules/zod/v4/classic/schemas.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/schemas.js
 var schemas_exports2 = {};
 __export(schemas_exports2, {
   ZodAny: () => ZodAny,
@@ -44857,7 +44863,7 @@ __export(schemas_exports2, {
   xor: () => xor
 });
 
-// node_modules/zod/v4/classic/checks.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/checks.js
 var checks_exports2 = {};
 __export(checks_exports2, {
   endsWith: () => _endsWith,
@@ -44891,7 +44897,7 @@ __export(checks_exports2, {
   uppercase: () => _uppercase
 });
 
-// node_modules/zod/v4/classic/iso.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/iso.js
 var iso_exports = {};
 __export(iso_exports, {
   ZodISODate: () => ZodISODate,
@@ -44932,7 +44938,7 @@ function duration2(params) {
   return _isoDuration(ZodISODuration, params);
 }
 
-// node_modules/zod/v4/classic/errors.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/errors.js
 var initializer2 = (inst, issues) => {
   $ZodError.init(inst, issues);
   inst.name = "ZodError";
@@ -44972,7 +44978,7 @@ var ZodRealError = /* @__PURE__ */ $constructor("ZodError", initializer2, {
   Parent: Error
 });
 
-// node_modules/zod/v4/classic/parse.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/parse.js
 var parse3 = /* @__PURE__ */ _parse(ZodRealError);
 var parseAsync2 = /* @__PURE__ */ _parseAsync(ZodRealError);
 var safeParse2 = /* @__PURE__ */ _safeParse(ZodRealError);
@@ -44986,7 +44992,7 @@ var safeDecode2 = /* @__PURE__ */ _safeDecode(ZodRealError);
 var safeEncodeAsync2 = /* @__PURE__ */ _safeEncodeAsync(ZodRealError);
 var safeDecodeAsync2 = /* @__PURE__ */ _safeDecodeAsync(ZodRealError);
 
-// node_modules/zod/v4/classic/schemas.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/schemas.js
 var _installedGroups = /* @__PURE__ */ new WeakMap();
 function _installLazyMethods(inst, group, methods) {
   const proto = Object.getPrototypeOf(inst);
@@ -46276,7 +46282,7 @@ function preprocess(fn2, schema2) {
   });
 }
 
-// node_modules/zod/v4/classic/compat.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/compat.js
 var ZodIssueCode = {
   invalid_type: "invalid_type",
   too_big: "too_big",
@@ -46302,7 +46308,7 @@ var ZodFirstPartyTypeKind;
 /* @__PURE__ */ (function(ZodFirstPartyTypeKind2) {
 })(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
 
-// node_modules/zod/v4/classic/from-json-schema.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/from-json-schema.js
 var z = {
   ...schemas_exports2,
   ...checks_exports2,
@@ -46782,7 +46788,7 @@ function fromJSONSchema(schema2, params) {
   return convertSchema(normalized, ctx2);
 }
 
-// node_modules/zod/v4/classic/coerce.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/coerce.js
 var coerce_exports = {};
 __export(coerce_exports, {
   bigint: () => bigint3,
@@ -46807,7 +46813,7 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/zod/v4/classic/external.js
 config(en_default());
 
 // src/json-schema-2020.ts
@@ -47557,7 +47563,7 @@ function connectorServersSnapshot(claudeConfigDir) {
   return servers;
 }
 
-// node_modules/cc-session-io/dist/chunk-7RWUSC7F.js
+// ../../../../dot314/agent/extensions/pi-claude-bridge/node_modules/cc-session-io/dist/chunk-7RWUSC7F.js
 import { randomUUID as randomUUID2 } from "crypto";
 import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync2, appendFileSync as appendFileSync3, existsSync as existsSync5, rmSync as rmSync2 } from "fs";
 import { dirname as dirname6 } from "path";
@@ -49883,6 +49889,7 @@ var ROTATION_STATE_KEY = /* @__PURE__ */ Symbol("claude-bridge:rotationState");
 var HOST_RESUME_MARKER = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.host-resume.v1");
 var HOST_RESUMED_TURN = /* @__PURE__ */ Symbol.for("kendex.pi.claude-bridge.host-resumed-turn.v1");
 var HOST_RESUMED_PROMPT = "Continue from the completed tool results above; do not repeat completed tool calls.";
+var FAILED_REPLY_RETRY_PROMPT = "[Claude bridge: your previous reply failed before it finished, and Pi is retrying it. The tool results above are complete. Continue from them, and do not repeat a tool call whose result is already above.]";
 var MAX_ROTATION_ATTEMPTS = 16;
 var MODELS = buildModels(getModels("anthropic"));
 function extractAllToolResults2(context) {
@@ -50155,6 +50162,7 @@ function restartContext(context, reason) {
 }
 function onPiHistoryReplaced(event) {
   const queryCtx = ctx();
+  queryCtx.failedCallback = null;
   const running = queryCtx.activeQuery !== null;
   const restarts = running && !queryCtx.detachedFromSharedSession;
   if (running) {
@@ -50199,11 +50207,20 @@ function verifiedHeldSuffix(queryCtx, messages, through, opts) {
     claimedResultIds: queryCtx.claimedResultIds
   }, opts);
 }
+function resultIdsOf(results) {
+  return new Set(results.flatMap((result) => result.toolCallId === void 0 ? [] : [result.toolCallId]));
+}
+function rememberFailedToolReply(owner, error51, ids, replacement) {
+  if (owner.sessionEnded || owner.requestAborted() || owner.piHistoryReplaced || ids.size === 0 || !isRetryableAssistantError(error51)) return;
+  const current = peekCtx();
+  if (current !== owner && (current !== replacement || !Boolean(current) || current.activeQuery !== null || current.forkSyncPending)) return;
+  current.failedCallback = { toolCallIds: new Set(ids) };
+}
 function streamClaudeAgentSdk(model, context, options) {
   const hostResumed = isHostResumedTurn(options, context.messages);
   if (hostResumed) debug(`provider: host-resumed turn (session ${options.sessionId.slice(0, 8)}): its query ended with the host; continuing from ${context.messages.length} messages`);
-  const laneId = hostResumed ? options.sessionId : requestLaneFor(options?.sessionId, context.messages, (lane2) => runInRequestLane(lane2, () => isForeignConversation(getSharedSession(), context.messages)));
-  return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, void 0, hostResumed));
+  const laneId = hostResumed ? options.sessionId : requestLaneFor(Boolean(options) ? options.sessionId : void 0, context.messages, Boolean(options) && options.cacheRetention === "none" ? "one-shot" : "conversation", (lane2) => runInRequestLane(lane2, () => isForeignConversation(getSharedSession(), context.messages)));
+  return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, void 0, hostResumed ? "host-resumed" : "none"));
 }
 function isHostResumedTurn(options, messages) {
   const sessionId = options?.sessionId;
@@ -50217,9 +50234,9 @@ function isHostResumedTurn(options, messages) {
   const results = messages.slice(assistant + 1, end + 1).map((message) => message.toolCallId);
   return calls.length === results.length && calls.every((id) => results.includes(id)) && idleForHostResume(sessionId, messages);
 }
-function streamClaudeAgentSdkInLane(model, context, options, inherited, hostResumed = false) {
+function streamClaudeAgentSdkInLane(model, context, options, inherited, continuation = "none") {
   const laneId = currentRequestLaneId();
-  const ephemeralLane = laneId !== void 0 && (options?.cacheRetention === "none" || isForkLane(laneId));
+  const ephemeralLane = isForkLane(laneId);
   const releaseLane = () => {
     deleteSharedSessionLane(laneId);
     deleteQueryLane(laneId);
@@ -50232,14 +50249,14 @@ function streamClaudeAgentSdkInLane(model, context, options, inherited, hostResu
   const stream = newAssistantMessageEventStream();
   const timing = inherited ?? startRequestTiming(stream, laneId, model.id, context.messages.length);
   try {
-    return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed);
+    return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, continuation);
   } catch (error51) {
     releaseEphemeralLane();
     if (!inherited) timing?.settle("threw");
     throw error51;
   }
 }
-function streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed) {
+function streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, continuation) {
   const lastMsgRole = context.messages[context.messages.length - 1]?.role;
   const cwd = options?.cwd ?? piSessionCwd(options?.sessionId);
   debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}`);
@@ -50267,6 +50284,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
     queryCtx.callbackGeneration += 1;
     activeStreamIdleWatchdogs.get(queryCtx)?.refresh();
     const allResults = extractAllToolResults2(context);
+    queryCtx.callbackResultIds = resultIdsOf(allResults);
     debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
     syncServedTools(queryCtx, context);
     const toolsSettling = queryCtx.servedToolsSettling;
@@ -50372,14 +50390,20 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
     }
     return stream;
   }
-  if (!hostResumed && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !options?.signal?.aborted) {
+  const requestCancelled = Boolean(options) && Boolean(options.signal) && options.signal.aborted;
+  if (continuation === "none" && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !requestCancelled) {
     debug("provider: a tool result after Pi replaced the history of an ended query; restarting the turn on the new history");
     context = restartContext(context, "history-replaced");
   }
   const lastMsg = context.messages[lastConversationIndex(context.messages)];
+  const failedCallback = ctx().failedCallback;
+  if (Boolean(lastMsg) && lastMsg.role === "toolResult") {
+    ctx().failedCallback = null;
+    if (continuation === "none" && Boolean(failedCallback) && failedCallback.toolCallIds.has(lastMsg.toolCallId) && !requestCancelled) continuation = "failed-reply";
+  }
   const heldForRun = ctx().undeliveredFailure;
   const steeredResultId = lastMsg?.role !== "toolResult" && heldForRun && options?.signal && !options.signal.aborted && heldForRun.runSignals.has(options.signal) ? extractAllToolResults2(context).map((result) => result.toolCallId).find((id) => id !== void 0 && heldForRun.toolCallIds.has(id)) : void 0;
-  if (!hostResumed && (lastMsg?.role === "toolResult" || steeredResultId !== void 0)) {
+  if (continuation === "none" && (Boolean(lastMsg) && lastMsg.role === "toolResult" || steeredResultId !== void 0)) {
     if (timing) {
       timing.kind = "continuation";
       attachRequestTiming(ctx(), timing);
@@ -50415,6 +50439,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
       c.resetTurnState(model);
       if (lateFailure) {
         const error51 = { ...c.turnOutput, ...lateFailure.fields, stopReason: "error", errorMessage: lateFailure.errorMessage };
+        rememberFailedToolReply(c, error51, resultIdsOf(extractAllToolResults2(context)), null);
         stream.push({ type: "error", reason: "error", error: error51 });
       } else {
         stream.push({ type: "done", reason: "stop", message: c.turnOutput });
@@ -50496,6 +50521,8 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
   ctx().apiResponded = false;
   ctx().piHistoryReplaced = false;
   ctx().historyReplacedAfterQuery = false;
+  ctx().failedCallback = null;
+  ctx().callbackResultIds = continuation === "failed-reply" ? resultIdsOf(extractAllToolResults2(context)) : /* @__PURE__ */ new Set();
   ctx().reportedHistoryRestartDecline = false;
   ctx().servedToolsSettling = null;
   ctx().detachedFromSharedSession = false;
@@ -50569,8 +50596,8 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
   const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : void 0;
   const accountScope = accountSessionScope(account);
   const cursorBeforeSync = getSharedSession()?.cursor ?? null;
-  if (hostResumed) markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
-  const syncMessages = hostResumed ? [...context.messages, { role: "user", content: HOST_RESUMED_PROMPT, timestamp: Date.now() }] : context.messages;
+  if (continuation === "host-resumed") markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
+  const syncMessages = continuation !== "none" ? [...context.messages, { role: "user", content: continuation === "host-resumed" ? HOST_RESUMED_PROMPT : FAILED_REPLY_RETRY_PROMPT, timestamp: Date.now() }] : context.messages;
   const fresh = {
     model,
     context,
@@ -50595,7 +50622,7 @@ function streamRequestInLane(model, context, options, laneId, releaseEphemeralLa
     claudeExecutablePreflight,
     accountScope,
     cursorBeforeSync,
-    hostResumed,
+    continuation,
     syncMessages
   };
   const requestEnded = () => options?.signal?.aborted === true || peekCtx() !== attemptCtx;
@@ -50663,7 +50690,7 @@ function startFreshQuery(fresh, syncResult) {
     claudeExecutablePreflight,
     accountScope,
     cursorBeforeSync,
-    hostResumed,
+    continuation,
     syncMessages
   } = fresh;
   const { sessionId: resumeSessionId, promptStart } = syncResult;
@@ -50788,10 +50815,16 @@ function startFreshQuery(fresh, syncResult) {
     if (foreignContext || abortCtx.detachedFromSharedSession) return;
     markSessionForRebuild(opts);
   };
+  let quarantinedContext = null;
   const quarantine = (reason) => {
     markRebuildForThisQuery({ reason, forceRotate: true });
     detachContext(abortCtx);
+    quarantinedContext = ctx();
     abortCtx.detachedFromSharedSession = true;
+  };
+  const noteFailedCallback = (ending, errorMessage) => {
+    if (ending !== "error" || !Boolean(abortCtx.turnOutput)) return;
+    rememberFailedToolReply(abortCtx, { ...abortCtx.turnOutput, stopReason: "error", errorMessage }, abortCtx.callbackResultIds, quarantinedContext);
   };
   const dropDeferredUserMessages = (site, undelivered) => {
     const dropped = [...undelivered !== void 0 ? [undelivered] : [], ...abortCtx.deferredUserMessages];
@@ -50882,6 +50915,7 @@ function startFreshQuery(fresh, syncResult) {
         notice: idle,
         fields: { rateLimitType: "stream_idle", retryAfterMs: STREAM_IDLE_BACKOFF_HINT_MS, streamIdleTimeoutMs: timeoutMs }
       });
+      noteFailedCallback(ending, errorMessage);
       if (ending !== "error" && ending !== "held") {
         debug(`provider: stream idle timeout ended the request as ${ending}; no retry follows`);
       }
@@ -50928,7 +50962,7 @@ function startFreshQuery(fresh, syncResult) {
       });
       safeNotify(`${RATE_LIMIT_TOKEN} Claude ${failure.message} \u2014 resets ${formatResetTimestamp(resetAtMs ?? resetAt)}`, "warning");
     }
-    endStreamForFailure(abortCtx, { errorMessage: failure.message });
+    noteFailedCallback(endStreamForFailure(abortCtx, { errorMessage: failure.message }), failure.message);
   };
   let reentryStream = stream;
   consumeQuery(sdkQuery2, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, account, router, attemptFailure).then(async ({ capturedSessionId, failure }) => {
@@ -50962,7 +50996,13 @@ function startFreshQuery(fresh, syncResult) {
       if (failedSessionId) {
         const cursor = Math.max(context.messages.length, abortCtx.latestCursor, activeSession2?.cursor ?? 0);
         debug(`provider: terminal failure, persisting session=${failedSessionId.slice(0, 8)}, cursor=${cursor}, account=${account?.label ?? "legacy"}, droppedSteers=${droppedSteers.length}`);
-        persistSession({ sessionId: failedSessionId, cursor, cwd, ...accountScope, ...droppedSteers.length > 0 ? { needsRebuild: true, rebuildReason: "dropped-steers" } : {} });
+        const rebuildReason = droppedSteers.length > 0 ? "dropped-steers" : continuation === "failed-reply" ? "failed-reply-retry" : void 0;
+        const failedRecord = { sessionId: failedSessionId, cursor, cwd, ...accountScope };
+        if (Boolean(rebuildReason)) {
+          failedRecord.needsRebuild = true;
+          failedRecord.rebuildReason = rebuildReason;
+        }
+        persistSession(failedRecord);
       }
       if (failure.kind === "usage-credits") markRebuildForThisQuery({ reason: "usage-credits", forceRotate: true });
       return;
@@ -50994,19 +51034,19 @@ function startFreshQuery(fresh, syncResult) {
         abortCtx.timing?.noteQuery();
         debug(`provider: continuation query, model=${queryModel.id}, resume=${resumeId.slice(0, 8)}, account=${account?.label ?? "legacy"}, prompt=${steerShape}`);
         try {
-          const continuation = await consumeQuery(contQuery, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, account, router);
+          const continuation2 = await consumeQuery(contQuery, abortCtx, customToolNameToPi, queryModel, bridgeConfig, () => wasAborted, account, router);
           if (Boolean(abortCtx.restartRequest)) break;
-          if (continuation.failure) {
-            recordAttemptFailure(continuation.failure);
-            if (!abortCtx.handledTerminalError) surfaceFailure(continuation.failure);
-            if (continuation.failure.kind === "usage-credits") markRebuildForThisQuery({ reason: "usage-credits", forceRotate: true });
+          if (continuation2.failure) {
+            recordAttemptFailure(continuation2.failure);
+            if (!abortCtx.handledTerminalError) surfaceFailure(continuation2.failure);
+            if (continuation2.failure.kind === "usage-credits") markRebuildForThisQuery({ reason: "usage-credits", forceRotate: true });
             if (dropDeferredUserMessages("continuation-failure", steer).length > 0) {
               markRebuildForThisQuery({ reason: "dropped-steers" });
             }
             break;
           }
           const activeSession2 = getSharedSession();
-          const sid = continuation.capturedSessionId ?? activeSession2?.sessionId;
+          const sid = continuation2.capturedSessionId ?? activeSession2?.sessionId;
           if (sid) {
             persistSession({ sessionId: sid, cursor: activeSession2?.cursor ?? 0, cwd, ...accountScope });
           }
@@ -51099,7 +51139,7 @@ function startFreshQuery(fresh, syncResult) {
     const retryStream = runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, {
       ...options ?? {},
       [ROTATION_STATE_KEY]: rotationState
-    }, timing, hostResumed));
+    }, timing, continuation));
     for await (const event of retryStream) reentryStream.push(event);
     reentryStream.end();
   }).catch((error51) => {

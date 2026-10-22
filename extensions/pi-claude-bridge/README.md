@@ -99,6 +99,8 @@ A rebuild keeps as much of Claude Code's own transcript as it can. When that tra
 
 A forked Pi session can copy a verified prefix of its parent's Claude transcript into a separate transcript in the child's working directory. Cache reuse also depends on matching system prompts and tool definitions. Rebuilds retain re-encoded images when saved originals verify their content, and retain calls Claude Code answered itself. If Claude gives no model response on a retry after an unanswered attempt, the bridge stops automatic retries and suggests `/compact`.
 
+When Pi retries a failed reply to completed tool results, Claude continues from those results. One-shot requests, such as conversation summaries, use separate execution state and leave the main conversation intact.
+
 The bridge saves which Claude Code session belongs to the Pi session in the Pi session file, so reopening a Pi session resumes the same Claude Code conversation. When Pi compacts or rewrites the history during a Pi tool call, the bridge restarts from Pi's new history with the completed tool results. A query that used one of Claude Code's own connectors finishes first, and the next turn uses Pi's new history.
 
 ## Install

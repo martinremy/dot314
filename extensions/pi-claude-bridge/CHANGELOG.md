@@ -2,6 +2,13 @@
 
 Notable changes to this fork, newest first. The fork has no version numbers yet, so changes are grouped by the date they landed on main (Pacific time). A change that took several days to finish sits under the day it was finished. Each entry says what was wrong or missing, and what the bridge does now. Most entries list the commits behind them.
 
+## 2026-10-22
+
+### Fixed
+
+- Adapted nicobailon's fix for retries after a reply to tool results fails. Pi continues from completed results instead of ending with an empty response. Repeated failures rebuild the retry prompt once, and cancellation and billing stops remain terminal.
+- One-shot requests use separate execution state even when their history contains the main conversation's tool calls. Their own tool-result callbacks continue the same auxiliary query.
+
 ## 2026-10-12
 
 ### Fixed

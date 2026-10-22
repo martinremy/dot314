@@ -730,7 +730,7 @@ describe("a lane holding a failure for its tool-result callback", () => {
 		assert.equal(runInRequestLane("MAIN", () => ctx().undeliveredFailure), null, "a cancelled run delivers no callback to report it");
 		// The lane is idle: a request without the call is no longer sent to a
 		// fork because the lane is busy.
-		assert.equal(queryState.requestLaneFor("MAIN", [systemMessage("sys"), user("next prompt")]), "MAIN");
+		assert.equal(queryState.requestLaneFor("MAIN", [systemMessage("sys"), user("next prompt")], "conversation"), "MAIN");
 		assert.equal(forkLaneCount(), 0, "no fork lane was opened");
 	});
 
@@ -957,14 +957,16 @@ describe("a replacement query keeps its lane until it ends", () => {
 		const initial = [systemMessage("sys", [SLOW]), user(PARENT_PROMPT)];
 		const first = await collect(streamClaudeAgentSdk(model, { messages: initial }, options));
 		await tick(10);
-		runInRequestLane("ONE-SHOT", () => onPiHistoryReplaced("session_compact"));
+		const auxiliaryLane = queryState.requestLaneFor(options.sessionId, [...initial, first.at(-1).message], "one-shot");
+		assert.notEqual(auxiliaryLane, options.sessionId, "the one-shot owns separate execution state");
+		runInRequestLane(auxiliaryLane, () => onPiHistoryReplaced("session_compact"));
 		const compacted = [systemMessage("sys", [SLOW]), user("Summary of the conversation"), first.at(-1).message, toolResult("c1")];
 		const restarted = await collect(streamClaudeAgentSdk(model, { messages: compacted }, options));
 		assert.deepEqual(lastEvent(restarted), ["done", "toolUse"], "the restarted query handed Pi its tool call");
 		assert.equal(observed.queries[0].closed, true, "the original query was stopped");
 		// Let the original query's pipeline finish forwarding and clean up.
 		await tick(30);
-		const laneHeld = runInRequestLane("ONE-SHOT", () => ctx().activeQuery !== null);
+		const laneHeld = runInRequestLane(auxiliaryLane, () => ctx().activeQuery !== null);
 		const done = await collect(streamClaudeAgentSdk(model, { messages: [...compacted, restarted.at(-1).message, toolResult("restart-call")] }, options));
 		assert.deepEqual(lastEvent(done), ["done", "stop"]);
 		assert.equal(textOf(done), "restart done", "the restarted query received the result and answered");

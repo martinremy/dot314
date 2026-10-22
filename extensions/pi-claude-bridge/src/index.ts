@@ -2,6 +2,7 @@ import {
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
 	getCurrentTools,
+	isRetryableAssistantError,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type Context,
@@ -143,6 +144,8 @@ const HOST_RESUMED_TURN = Symbol.for("kendex.pi.claude-bridge.host-resumed-turn.
 /** A host-resumed turn's prompt. Never part of the host's history: the
  *  record's cursor and digests cover the host's messages only. */
 const HOST_RESUMED_PROMPT = "Continue from the completed tool results above; do not repeat completed tool calls.";
+const FAILED_REPLY_RETRY_PROMPT = "[Claude bridge: your previous reply failed before it finished, and Pi is retrying it. The tool results above are complete. Continue from them, and do not repeat a tool call whose result is already above.]";
+type ContinuationReason = "none" | "host-resumed" | "failed-reply";
 
 /** Hard cap on account-rotation attempts per request (CHANGELOG 3.0.0). */
 const MAX_ROTATION_ATTEMPTS = 16;
@@ -618,6 +621,7 @@ function restartContext(context: Context, reason: QueryRestartRequest["reason"])
  *  still be writing its previous transcript. */
 export function onPiHistoryReplaced(event: "session_compact" | "session_tree"): void {
 	const queryCtx = ctx();
+	queryCtx.failedCallback = null;
 	const running = queryCtx.activeQuery !== null;
 	const restarts = running && !queryCtx.detachedFromSharedSession;
 	if (running) {
@@ -681,16 +685,24 @@ function verifiedHeldSuffix(
 	}, opts);
 }
 
-/** Provider entry point. Pi calls this for each prompt and each tool result.
- *  Two cases: tool result delivery (active query) or fresh query. Exported for
- *  the rotation-stream unit tests, which drive it with a fake SDK factory.
- *  The request joins its lane's running query only as that query's own
- *  callback; anything else runs as a query of its own (requestLaneFor). */
+function resultIdsOf(results: McpResult[]): Set<string> {
+	return new Set(results.flatMap(result => result.toolCallId === undefined ? [] : [result.toolCallId]));
+}
+
+/** A quarantined query may authorize only its own empty replacement, never a newer query. */
+function rememberFailedToolReply(owner: QueryContext, error: AssistantMessage, ids: ReadonlySet<string>, replacement: QueryContext | null): void {
+	if (owner.sessionEnded || owner.requestAborted() || owner.piHistoryReplaced || ids.size === 0 || !isRetryableAssistantError(error)) return;
+	const current = peekCtx();
+	if (current !== owner && (current !== replacement || !Boolean(current) || current.activeQuery !== null || current.forkSyncPending)) return;
+	current.failedCallback = { toolCallIds: new Set(ids) };
+}
+
+/** Routes Pi prompts and tool callbacks; one-shots can join only their own fork's query. */
 export function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const hostResumed = isHostResumedTurn(options, context.messages);
 	if (hostResumed) debug(`provider: host-resumed turn (session ${options!.sessionId!.slice(0, 8)}): its query ended with the host; continuing from ${context.messages.length} messages`);
-	const laneId = hostResumed ? options!.sessionId : requestLaneFor(options?.sessionId, context.messages, (lane) => runInRequestLane(lane, () => isForeignConversation(getSharedSession(), context.messages)));
-	return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, undefined, hostResumed));
+	const laneId = hostResumed ? options!.sessionId : requestLaneFor(Boolean(options) ? options.sessionId : undefined, context.messages, Boolean(options) && options.cacheRetention === "none" ? "one-shot" : "conversation", (lane) => runInRequestLane(lane, () => isForeignConversation(getSharedSession(), context.messages)));
+	return runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, options, undefined, hostResumed ? "host-resumed" : "none"));
 }
 
 /** Whether this request continues a turn whose query died with its host: the
@@ -715,18 +727,13 @@ function isHostResumedTurn(options: SimpleStreamOptions | undefined, messages: C
 
 /** `inherited`: a re-entry (restart, account retry) answers on another
  *  request's Pi stream, so its phases go to that request's timing record.
- *  `hostResumed`: isHostResumedTurn granted the request (an account retry
- *  repeats it). */
-function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions, inherited?: RequestTiming, hostResumed = false): AssistantMessageEventStream {
+ *  `continuation` selects a transport-only prompt and survives account retry. */
+function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions, inherited?: RequestTiming, continuation: ContinuationReason = "none"): AssistantMessageEventStream {
 	// The lane this request runs in, for callbacks that fire OUTSIDE it: an
 	// AbortSignal listener runs in the aborter's async context, not ours.
 	const laneId = currentRequestLaneId();
-	// Pi marks its compaction and branch-summary one-shots with cacheRetention
-	// "none" and a fresh sessionId per call; no session_shutdown ever prunes
-	// those lanes. Map the hint onto lane lifetime: nothing about this request
-	// is retained once it settles. A fork lane (requestLaneFor) serves one
-	// query and its callbacks, so it goes the same way.
-	const ephemeralLane = laneId !== undefined && (options?.cacheRetention === "none" || isForkLane(laneId));
+	// One-shots own fork lanes, never the conversation's lane they name.
+	const ephemeralLane = isForkLane(laneId);
 	const releaseLane = (): void => {
 		deleteSharedSessionLane(laneId);
 		deleteQueryLane(laneId);
@@ -751,7 +758,7 @@ function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options
 	const stream = newAssistantMessageEventStream();
 	const timing = inherited ?? startRequestTiming(stream, laneId, model.id, context.messages.length);
 	try {
-		return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, hostResumed);
+		return streamRequestInLane(model, context, options, laneId, releaseEphemeralLane, stream, timing, continuation);
 	} catch (error) {
 		releaseEphemeralLane();
 		if (!inherited) timing?.settle("threw");
@@ -767,7 +774,7 @@ function streamRequestInLane(
 	releaseEphemeralLane: () => void,
 	stream: AssistantMessageEventStream,
 	timing: RequestTiming | undefined,
-	hostResumed: boolean,
+	continuation: ContinuationReason,
 ): AssistantMessageEventStream {
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -810,6 +817,7 @@ function streamRequestInLane(
 		queryCtx.callbackGeneration += 1;
 		activeStreamIdleWatchdogs.get(queryCtx)?.refresh();
 		const allResults = extractAllToolResults(context);
+		queryCtx.callbackResultIds = resultIdsOf(allResults);
 		debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
 		syncServedTools(queryCtx, context);
 		const toolsSettling = queryCtx.servedToolsSettling;
@@ -999,7 +1007,8 @@ function streamRequestInLane(
 	// Pi retrying a turn after it replaced the history (historyReplacedAfterQuery)
 	// restarts it the way a running query restarts on replaced history. The
 	// prompt rides on the context, so an account retry of this request repeats it.
-	if (!hostResumed && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !options?.signal?.aborted) {
+	const requestCancelled = Boolean(options) && Boolean(options.signal) && options.signal.aborted;
+	if (continuation === "none" && ctx().historyReplacedAfterQuery && context.messages[lastConversationIndex(context.messages)]?.role === "toolResult" && !requestCancelled) {
 		debug("provider: a tool result after Pi replaced the history of an ended query; restarting the turn on the new history");
 		context = restartContext(context, "history-replaced");
 	}
@@ -1015,11 +1024,16 @@ function streamRequestInLane(
 	// A host-resumed turn's query died with its host, so nothing else will
 	// continue the turn: it starts a fresh query instead (isHostResumedTurn).
 	const lastMsg = context.messages[lastConversationIndex(context.messages)];
+	const failedCallback = ctx().failedCallback;
+	if (Boolean(lastMsg) && lastMsg.role === "toolResult") {
+		ctx().failedCallback = null;
+		if (continuation === "none" && Boolean(failedCallback) && failedCallback.toolCallIds.has(lastMsg.toolCallId) && !requestCancelled) continuation = "failed-reply";
+	}
 	const heldForRun = ctx().undeliveredFailure;
 	const steeredResultId = lastMsg?.role !== "toolResult" && heldForRun && options?.signal && !options.signal.aborted && heldForRun.runSignals.has(options.signal)
 		? extractAllToolResults(context).map((result) => result.toolCallId).find((id) => id !== undefined && heldForRun.toolCallIds.has(id))
 		: undefined;
-	if (!hostResumed && (lastMsg?.role === "toolResult" || steeredResultId !== undefined)) {
+	if (continuation === "none" && ((Boolean(lastMsg) && lastMsg.role === "toolResult") || steeredResultId !== undefined)) {
 		if (timing) {
 			timing.kind = "continuation";
 			attachRequestTiming(ctx(), timing);
@@ -1066,6 +1080,7 @@ function streamRequestInLane(
 			if (lateFailure) {
 				// A fresh message: the delivered tool-use turn stays as it was.
 				const error: AssistantMessage = { ...c.turnOutput!, ...lateFailure.fields, stopReason: "error", errorMessage: lateFailure.errorMessage };
+				rememberFailedToolReply(c, error, resultIdsOf(extractAllToolResults(context)), null);
 				stream.push({ type: "error", reason: "error", error });
 			} else {
 				stream.push({ type: "done", reason: "stop", message: c.turnOutput });
@@ -1157,6 +1172,8 @@ function streamRequestInLane(
 	ctx().apiResponded = false;
 	ctx().piHistoryReplaced = false;
 	ctx().historyReplacedAfterQuery = false;
+	ctx().failedCallback = null;
+	ctx().callbackResultIds = continuation === "failed-reply" ? resultIdsOf(extractAllToolResults(context)) : new Set();
 	ctx().reportedHistoryRestartDecline = false;
 	ctx().servedToolsSettling = null;
 	// A foreign-conversation one-shot sets it below once syncSharedSession has
@@ -1268,14 +1285,14 @@ function streamRequestInLane(
 	// tool results included, and prompts with HOST_RESUMED_PROMPT. The new
 	// session takes a new id: the host's killed Claude Code child may still be
 	// writing the old transcript.
-	if (hostResumed) markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
-	const syncMessages: Context["messages"] = hostResumed
-		? [...context.messages, { role: "user", content: HOST_RESUMED_PROMPT, timestamp: Date.now() }]
+	if (continuation === "host-resumed") markSessionForRebuild({ reason: "host-resumed", forceRotate: true });
+	const syncMessages: Context["messages"] = continuation !== "none"
+		? [...context.messages, { role: "user", content: continuation === "host-resumed" ? HOST_RESUMED_PROMPT : FAILED_REPLY_RETRY_PROMPT, timestamp: Date.now() }]
 		: context.messages;
 	const fresh: FreshQuery = {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, continuation, syncMessages,
 	};
 	// A forked rebuild awaits the SDK: by then the request may be cancelled, or
 	// a session shutdown may have ended its lane (a new context replaced this
@@ -1316,7 +1333,7 @@ interface FreshQuery {
 	claudeExecutablePreflight: ReturnType<typeof preflightClaudeExecutable> | undefined;
 	accountScope: ReturnType<typeof accountSessionScope>;
 	cursorBeforeSync: number | null;
-	hostResumed: boolean;
+	continuation: ContinuationReason;
 	// What the Claude session is synced to: the context, and a host-resumed
 	// turn's prompt after it. The query's prompt is its tail from promptStart.
 	syncMessages: Context["messages"];
@@ -1376,7 +1393,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	const {
 		model, context, options, laneId, releaseEphemeralLane, stream, timing, cwd, lastMsg, router, rotationState, account,
 		queryModel, attemptCtx, attemptBuffer, mcpTools, customToolNameToPi, bridgeConfig, providerSettings, claudeExecutable,
-		claudeExecutablePreflight, accountScope, cursorBeforeSync, hostResumed, syncMessages,
+		claudeExecutablePreflight, accountScope, cursorBeforeSync, continuation, syncMessages,
 	} = fresh;
 	const { sessionId: resumeSessionId, promptStart } = syncResult;
 	timing?.noteSync(syncResult.sync, Boolean(resumeSessionId));
@@ -1552,10 +1569,16 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 	// now. The rotation mark comes first because the next prompt syncs the
 	// session synchronously; after the hand-off this query's late teardown must
 	// not touch the record the replacement owns.
+	let quarantinedContext: QueryContext | null = null;
 	const quarantine = (reason: "abort" | "idle-timeout"): void => {
 		markRebuildForThisQuery({ reason, forceRotate: true });
 		detachContext(abortCtx);
+		quarantinedContext = ctx();
 		abortCtx.detachedFromSharedSession = true;
+	};
+	const noteFailedCallback = (ending: ReturnType<typeof endStreamForFailure>, errorMessage: string): void => {
+		if (ending !== "error" || !Boolean(abortCtx.turnOutput)) return;
+		rememberFailedToolReply(abortCtx, { ...abortCtx.turnOutput, stopReason: "error", errorMessage }, abortCtx.callbackResultIds, quarantinedContext);
 	};
 	//  invariant: a deferred (mid-query) user message may be dropped only
 	// LOUDLY — the cursor already advanced over it on the promise of replay.
@@ -1676,6 +1699,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 					notice: idle,
 					fields: { rateLimitType: "stream_idle", retryAfterMs: STREAM_IDLE_BACKOFF_HINT_MS, streamIdleTimeoutMs: timeoutMs },
 				});
+				noteFailedCallback(ending, errorMessage);
 				// Only an error can be retried, by Pi's own auto-retry, which shows
 				// its own notice when it does; Pi shows the turn's error. A kept
 				// reply was reported by the ender; a cancelled request needs no
@@ -1735,7 +1759,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 			});
 			safeNotify(`${RATE_LIMIT_TOKEN} Claude ${failure.message} — resets ${formatResetTimestamp(resetAtMs ?? resetAt)}`, "warning");
 		}
-		endStreamForFailure(abortCtx, { errorMessage: failure.message });
+		noteFailedCallback(endStreamForFailure(abortCtx, { errorMessage: failure.message }), failure.message);
 	};
 
 	// Background consumer — runs until this attempt's query ends. Before any
@@ -1794,7 +1818,13 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 				if (failedSessionId) {
 					const cursor = Math.max(context.messages.length, abortCtx.latestCursor, activeSession?.cursor ?? 0);
 					debug(`provider: terminal failure, persisting session=${failedSessionId.slice(0, 8)}, cursor=${cursor}, account=${account?.label ?? "legacy"}, droppedSteers=${droppedSteers.length}`);
-					persistSession({ sessionId: failedSessionId, cursor, cwd, ...accountScope, ...(droppedSteers.length > 0 ? { needsRebuild: true, rebuildReason: "dropped-steers" } : {}) });
+					const rebuildReason = droppedSteers.length > 0 ? "dropped-steers" : continuation === "failed-reply" ? "failed-reply-retry" : undefined;
+					const failedRecord: SessionState = { sessionId: failedSessionId, cursor, cwd, ...accountScope };
+					if (Boolean(rebuildReason)) {
+						failedRecord.needsRebuild = true;
+						failedRecord.rebuildReason = rebuildReason;
+					}
+					persistSession(failedRecord);
 				}
 				// The interrupted child may still write; the next prompt must use a new session.
 				if (failure.kind === "usage-credits") markRebuildForThisQuery({ reason: "usage-credits", forceRotate: true });
@@ -1989,7 +2019,7 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 			const retryStream = runInRequestLane(laneId, () => streamClaudeAgentSdkInLane(model, context, {
 				...(options ?? {}),
 				[ROTATION_STATE_KEY]: rotationState,
-			} as BridgeStreamOptions, timing, hostResumed));
+			} as BridgeStreamOptions, timing, continuation));
 			// End exactly once per outcome. Ending in a `finally` ran on
 			// the throw path too, BEFORE the .catch below could push its error
 			// event — and EventStream.push is a silent no-op after end, so a failed

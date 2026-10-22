@@ -314,6 +314,10 @@ export class QueryContext {
 	 *  query died on "Prompt is too long" and Pi compacted), which no query
 	 *  will continue, so it restarts the turn on the new history. */
 	historyReplacedAfterQuery = false;
+	/** Completed results being answered on the current Pi response stream. */
+	callbackResultIds = new Set<string>();
+	/** One-use authorization for Pi to retry a failed reply, never persisted. */
+	failedCallback: { toolCallIds: ReadonlySet<string> } | null = null;
 	reportedHistoryRestartDecline = false;
 	restartRequest: QueryRestartRequest | null = null;
 	latestCursor = 0;
@@ -1200,12 +1204,13 @@ function contextToolCallIds(messages: ReadonlyArray<unknown>): string[] {
 	return ids;
 }
 
-/** Whether `queryCtx`'s query handed Pi one of `ids`. */
+/** Whether the context owns a call or a retryable failed reply to its results. */
 function handedToPi(queryCtx: QueryContext, ids: readonly string[]): boolean {
-	return ids.some((id) => queryCtx.forwardedToolCallIds.has(id));
+	return ids.some((id) => queryCtx.forwardedToolCallIds.has(id) || (Boolean(queryCtx.failedCallback) && queryCtx.failedCallback.toolCallIds.has(id)));
 }
 
 /** The lane a provider request with `sessionId` and `messages` runs in:
+ *  A one-shot considers callbacks only in its own fork lanes, never the base.
  *  - the lane (or a fork of it) whose query handed Pi a tool call the context
  *    carries: the request is that query's callback, running or ended;
  *  - otherwise the `sessionId` lane itself while its conversation is idle,
@@ -1220,12 +1225,14 @@ function handedToPi(queryCtx: QueryContext, ids: readonly string[]): boolean {
 export function requestLaneFor(
 	sessionId: string | undefined,
 	messages: ReadonlyArray<unknown>,
+	disposition: "conversation" | "one-shot",
 	otherConversation: (laneId: string | undefined) => boolean = () => false,
 ): string | undefined {
 	const own = peekQueryContext(sessionId);
-	const callback = callbackLane(sessionId, messages);
+	const callback = callbackLane(sessionId, messages, disposition === "one-shot" ? "forks" : "all");
 	if (callback !== null) return callback;
-	const reason = contextInUse(own) ? "its lane is busy"
+	const reason = disposition === "one-shot" ? "the request is a one-shot"
+		: contextInUse(own) ? "its lane is busy"
 		: (messages[lastConversationIndex(messages as Context["messages"])] as { role?: unknown } | undefined)?.role === "toolResult" ? "its tool result answers no call of its lane"
 		: otherConversation(sessionId) ? "its lane holds another conversation"
 		: undefined;
@@ -1239,11 +1246,11 @@ export function requestLaneFor(
 /** The lane (`sessionId`'s own, or a fork of it) whose query handed Pi a tool
  *  call `messages` carries, running or ended: the request is that query's
  *  callback. Null when there is none. */
-function callbackLane(sessionId: string | undefined, messages: ReadonlyArray<unknown>): string | undefined | null {
+function callbackLane(sessionId: string | undefined, messages: ReadonlyArray<unknown>, scope: "all" | "forks"): string | undefined | null {
 	const ids = contextToolCallIds(messages);
 	if (ids.length === 0) return null;
 	const own = peekQueryContext(sessionId);
-	if (own && handedToPi(own, ids)) return sessionId;
+	if (scope === "all" && Boolean(own) && handedToPi(own, ids)) return sessionId;
 	for (const [forkId, fork] of forkLaneStore()) {
 		if (fork.base !== sessionId) continue;
 		const forkCtx = peekQueryContext(forkId);
@@ -1257,7 +1264,7 @@ function callbackLane(sessionId: string | undefined, messages: ReadonlyArray<unk
  *  lane or its forks made a call `messages` carries. Such a query's callback
  *  keeps its own path even when the query has ended (requestLaneFor). */
 export function idleForHostResume(sessionId: string, messages: ReadonlyArray<unknown>): boolean {
-	return !contextInUse(peekQueryContext(sessionId)) && callbackLane(sessionId, messages) === null;
+	return !contextInUse(peekQueryContext(sessionId)) && callbackLane(sessionId, messages, "all") === null;
 }
 
 /** The Pi session request lane `laneId` serves: a fork lane's base, else
