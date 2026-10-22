@@ -89,15 +89,15 @@ Claude Code's own file, shell and web tools are turned off. The bridge serves Pi
    │ RESUME               │        │ REBUILD                       │
    │ send only the new    │        │ write Pi's history out as a   │
    │ messages; the prompt │        │ Claude Code transcript, then  │
-   │ cache stays warm     │        │ resume from it                │
+   │ cache can stay warm  │        │ resume from it                │
    └──────────────────────┘        └───────────────────────────────┘
                                     e.g. after /compact or /tree, or
                                     when another model took turns
 ```
 
-A rebuild keeps as much of Claude Code's own transcript as it can. When that transcript still holds the start of Pi's history with the same content, as it does after you press Esc, the bridge copies those records as they are into the new session and writes only the rest from Pi's history. Claude Code then sends the same request bytes as before, and the prompt cache still covers that part.
+A rebuild copies verified matching records from Claude Code's transcript into the new session and imports the rest from Pi's history. Keeping the copied prefix unchanged allows cache reuse when the system prompt and tool definitions also match and Anthropic still has that prefix cached.
 
-A forked Pi session can copy a verified prefix of its parent's Claude transcript into a separate transcript in the child's working directory. Cache reuse also depends on matching system prompts and tool definitions. Rebuilds retain re-encoded images when saved originals verify their content, and retain calls Claude Code answered itself. If Claude gives no model response on a retry after an unanswered attempt, the bridge stops automatic retries and suggests `/compact`.
+A forked Pi session can copy a verified prefix of its parent's Claude transcript into a separate transcript in the child's working directory. Rebuilds retain re-encoded images when saved originals verify their content, and retain calls Claude Code answered itself. If Claude gives no model response on a retry after an unanswered attempt, the bridge stops automatic retries and suggests `/compact`.
 
 When Pi retries a failed reply to completed tool results, Claude continues from those results. One-shot requests, such as conversation summaries, use separate execution state and leave the main conversation intact.
 
@@ -189,6 +189,8 @@ This comparison uses [Kendex's `@vanillagreen/pi-claude-bridge` 4.0.8](https://g
 - Uses user and trusted-project `claude-bridge.json` files directly, with subprocess options under `provider`. Kendex also reads its extension-manager namespace in `settings.json` and exposes a settings panel; here `/pi-claude` shows status.
 - Always uses strict MCP configuration. Claude Code loads no filesystem settings by default outside connector mode, and user settings only in connector mode; `provider.settingSources` explicitly overrides that choice.
 - Removes inherited `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from unmanaged Claude Code children unless the user enables `provider.inheritAnthropicEnv`. These variables also follow that setting when checking whether the provider has credentials.
+- Removes inherited Claude Code session identifiers, messaging variables and effort from child environments. Nonessential-traffic suppression applies to Claude Code children rather than Pi's own process.
+- Requires `provider.allowUsageCredits: true` in user configuration for usage credits. Unapproved use reported by Claude Code stops the query, queued continuations and account rotation; the request may already have incurred a charge.
 - Adds troubleshooting text after an actual third-party-app rejection from Anthropic. Such a rejection ends the request on the current account instead of being treated as a rate limit that rotates through other profiles.
 
 ### Tools and streamed replies
@@ -198,6 +200,7 @@ This comparison uses [Kendex's `@vanillagreen/pi-claude-bridge` 4.0.8](https://g
 - Forwards Pi's JSON Schema definitions and referenced definitions, where Kendex converts them through Zod. Pi validates the arguments; fragments incompatible with JSON Schema 2020-12 are omitted from the advertised schema.
 - Updates tools during a running query when Pi enables, disables or redefines them. Calls already issued retain the handler and definition they need until their results are delivered.
 - Sets the maximum MCP timeout and disables Claude Code's automatic backgrounding for Pi tools. A warning identifies calls Claude Code stopped waiting for.
+- Leaves an omitted bash timeout unset instead of injecting a 120-second limit.
 - Replaces abandoned response attempts with their retries and withdraws calls belonging to the abandoned attempt. Incomplete tool calls are excluded on completion, failure and abort paths; late siblings are delivered in a new turn rather than appended to one Pi already consumed.
 - Keeps the in-progress stream intact when producing the completed or failed message. It extends the wait for tool arguments while they are still arriving, rather than ending a call mid-stream.
 - Keeps Claude Code's file, shell and web built-ins disabled even when Pi provides no tools. Kendex 4.0.8 can restore those built-ins for an ordinary non-connector request whose Pi tools did not reach the child.
@@ -208,26 +211,36 @@ This comparison uses [Kendex's `@vanillagreen/pi-claude-bridge` 4.0.8](https://g
 - Tracks which user messages the query has accepted, including messages interleaved with tool results. Repeated callbacks do not resend them; ambiguous history changes are handled by rebuilding from Pi's history.
 - Retains completed replies when a deferred continuation fails, warns about the unanswered message, and keeps legitimate repeated text from successive replies.
 - Reports a failure that arrives after Pi received a tool turn through the following tool-result callback, rather than changing the delivered turn or treating it as success.
+- Continues Pi's retry of a failed reply from the completed tool results, with a continuation prompt excluded from Pi's stored history. Cancellation and nonretryable failures do not authorize that continuation.
+- Restarts at a Pi tool boundary when system instructions change, using the current prompt and completed results. A query with child-executed calls absent from Pi's history stops with an error rather than replaying incomplete history.
 - Starts a fresh query for a prompt submitted just after Esc. Cancellation stops waiting for an unresponsive Claude Code query after a five-second grace period.
 - Watches for silence throughout the response, including after the first output, while allowing for Pi tool execution and retry backoff announced by Claude Code.
-- Runs reviewers, summarizers and MCP sampling requests as their own Claude queries, even when they share the main conversation's Pi session id. They cannot take over a main query that is waiting for a tool result.
+- Stops repeated unanswered attempts after an idle-timeout rebuild instead of retrying indefinitely.
+- Runs reviewers, summarizers and MCP sampling requests as their own Claude queries, even when they share the main conversation's Pi session id. Explicit one-shots stay separate even when they include the main conversation's tool history; their callbacks continue their own query and their completion leaves the main session's state intact.
 
 ### History and models
 
 - Checks a content hash before reusing Claude's session, detecting edits that leave the message count unchanged. Tool-result bodies are excluded from that check so pruning old results does not force a rebuild.
+- Copies verified native transcript prefixes for rebuilds and Pi forks, including calls Claude Code answered itself and re-encoded images backed by verified saved originals. A fork reads its parent's transcript without changing it.
+- Distinguishes copied Pi session files from their originals. Checks for native conversation turns appended after the bridge's last observed reply and rebuilds into a separate transcript when the source is changed or cannot be verified.
 - A reopened Pi session still rebuilds when Claude's copy was left out of date. Rebuilds omit failed or aborted assistant turns and their associated tool results.
+- Imports failed tool results as text, matching Claude Code's live MCP representation. Images in successful results remain available for replay.
 - Replays redacted thinking in its correct format. A trailing Claude reply with incomplete thinking becomes a note containing its text, calls and results in order, including result images.
 - Suppresses Claude Code's automatic continuation of an interrupted stored turn; Pi supplies the next prompt.
 - Keeps unanswered prompts available after Esc and suppresses Claude Code's synthetic "No response requested." reply.
 - Adds Sonnet 5.5 to the supported model list. Thinking "off" sends disabled thinking where supported; Pi hides that choice for Fable 5.1, Opus 5.5 and Sonnet 5.5.
-- Reports thinking-token usage separately. The reply retains the model id Pi requested and records a different serving model as `responseModel`; Claude Code's safety-related model switches are announced.
+- Provides `/pi-claude models` to inspect the selected account's Claude Code picker catalog without a model request or filtering Pi's supported model list.
+- Reports the latest underlying Claude request's usage so internal requests do not multiply Pi's context estimate. Reasoning tokens and cache writes with a one-hour lifetime are reported as subsets; these counters do not measure total subscription consumption.
+- The reply retains the model id Pi requested and records a different serving model as `responseModel`; Claude Code's safety-related model switches are announced.
 
 ### Diagnostics and distribution
 
 - Agent notices require `agentNotices: true` in user configuration, independently of `CLAUDE_BRIDGE_DEBUG=1`. Errors and warnings that need attention still appear in Pi by default.
+- Reports a rejected subscription allowance as the cause of subsequent transport failures or idle termination, preventing Pi from retrying a spent quota. Warning deduplication is scoped to the account and Pi interface; each affected request still emits its rate-limit event.
 - Rotates debug and diagnostic logs, prunes old Claude Code CLI logs, and records the versions of Node, Pi and Claude Code when debugging is enabled. Log messages summarize payloads using counts, types and lengths; malformed JSON diagnostics omit the input text quoted by the parser.
 - Keeps provider registration and shared module state usable across `/new`, fork, resume and `/reload`, including when Pi loads TypeScript source directly.
 - Ships as dot314's local extension with a committed provider bundle. `npm run test:ci` builds it, checks types and exported state, and runs the offline tests. Includes `package-lock.json` for reproducible installation and requires Claude Agent SDK `0.3.284`.
+- Selects native `.exe` files when looking for Claude Code on Windows PATH, rather than extensionless shell wrappers.
 
 ### Changes developed separately in Kendex
 
