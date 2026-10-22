@@ -119,6 +119,11 @@ export function subscriberProfileEnv(
 // from the Claude Code login, so an unmanaged child drops them unless
 // `provider.inheritAnthropicEnv` opts in.
 const ANTHROPIC_ROUTING_ENV = ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+const CLAUDE_PARENT_SESSION_ENV = [
+	"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_CHILD_SESSION",
+	"CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+	"CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID", "CLAUDE_EFFORT", "CLAUDE_PID",
+];
 
 /** Base environment for every Claude Code child; callers add bridge-owned
  *  overrides after it. A managed profile always gets `subscriberProfileEnv`'s
@@ -128,9 +133,10 @@ export function claudeChildEnv(
 	inheritAnthropicEnv: boolean | undefined,
 	base: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-	if (profile) return subscriberProfileEnv(profile, base);
-	const env: NodeJS.ProcessEnv = { ...base };
-	if (!inheritAnthropicEnv) for (const key of ANTHROPIC_ROUTING_ENV) delete env[key];
+	const env: NodeJS.ProcessEnv = profile === undefined ? { ...base } : subscriberProfileEnv(profile, base);
+	if (profile === undefined && !inheritAnthropicEnv) for (const key of ANTHROPIC_ROUTING_ENV) delete env[key];
+	for (const key of CLAUDE_PARENT_SESSION_ENV) delete env[key];
+	env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
 	return env;
 }
 

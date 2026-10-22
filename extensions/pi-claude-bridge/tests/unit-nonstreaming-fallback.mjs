@@ -200,7 +200,7 @@ describe("Claude Code's retry after a stalled stream", () => {
 		const expected = [
 			["thinking", "Let me look at both."],
 			["text", "Reading the log."],
-			["toolCall", "toolu_b", { command: "ls", timeout: 120 }],
+			["toolCall", "toolu_b", { command: "ls" }],
 		];
 		assert.deepEqual(summarize(done.message.content), expected, "only the replacement's complete blocks");
 		assert.equal(done.message.content[0].thinkingSignature, "sig");
@@ -248,7 +248,7 @@ describe("Claude Code's retry after a stalled stream", () => {
 		const { done } = await runLikePi(context, "fallback-restream");
 		assert.equal(done.type, "done");
 		assert.equal(done.reason, "toolUse");
-		assert.deepEqual(summarize(done.message.content), [["text", "Checking."], ["toolCall", "toolu_b", { command: "ls", timeout: 120 }]], "only the retried stream's blocks");
+		assert.deepEqual(summarize(done.message.content), [["text", "Checking."], ["toolCall", "toolu_b", { command: "ls" }]], "only the retried stream's blocks");
 		assert.equal(done.message.usage.input, 100, "the abandoned attempt's input is not counted twice");
 		assert.equal(done.message.usage.output, 40, "message_delta usage of the retry");
 
@@ -328,7 +328,7 @@ describe("discarding an abandoned attempt", () => {
 		assert.deepEqual(summarize(done.message.content), [
 			["thinking", "Let me look at both."],
 			["text", "Reading the log."],
-			["toolCall", "toolu_b", { command: "ls", timeout: 120 }],
+			["toolCall", "toolu_b", { command: "ls" }],
 		]);
 		assert.ok(c.deadToolCallIds.has("toolu_cut"), "the partial call can never be forwarded later");
 		assert.ok(c.deadToolCallIds.has("toolu_done"), "nor the completed one");

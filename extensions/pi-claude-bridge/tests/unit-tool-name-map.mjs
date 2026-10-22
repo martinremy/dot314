@@ -1,9 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { isPiDispatchable, mapToolName } from "../src/index.ts";
-import { markAuthoritativeManifest } from "../src/tool-mapping.ts";
+import { mapToolArgs, markAuthoritativeManifest } from "../src/tool-mapping.ts";
 
 describe("tool name mapping", () => {
+	it("passes omitted and explicit bash timeouts through unchanged", () => {
+		assert.deepEqual(mapToolArgs("bash", { command: "echo ok" }), { command: "echo ok" });
+		assert.deepEqual(mapToolArgs("Bash", { command: "echo ok", timeout: 37 }), { command: "echo ok", timeout: 37 });
+	});
+
 	it("maps known Claude builtin names to Pi tool names", () => {
 		assert.equal(mapToolName("Read"), "read");
 	});

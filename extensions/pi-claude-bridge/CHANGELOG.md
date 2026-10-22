@@ -6,6 +6,8 @@ Notable changes to this fork, newest first. The fork has no version numbers yet,
 
 ### Fixed
 
+- Adapted nicobailon's tool and child-setup fixes: omitted bash timeouts stay omitted, every Claude child drops inherited parent-session variables, and Windows PATH lookup selects native `.exe` files. Nonessential-traffic suppression is set on child environments rather than Pi's process environment.
+
 - Adapted nicobailon's fix for retries after a reply to tool results fails. Pi continues from completed results instead of ending with an empty response. Repeated failures rebuild the retry prompt once, and cancellation and billing stops remain terminal.
 - One-shot requests use separate execution state even when their history contains the main conversation's tool calls. Their own tool-result callbacks continue the same auxiliary query.
 

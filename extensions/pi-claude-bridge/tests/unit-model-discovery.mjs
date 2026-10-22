@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, it } from "node:test";
 import claudeBridge, { __testSetSdkQueryFactory } from "../src/index.ts";
 import { CLAUDE_ACCOUNT_ROUTER_SYMBOL } from "../src/account-router.ts";
+import { PARENT_SESSION_ENV } from "./fixtures/parent-session-env.mjs";
 
 const CATALOG = [
 	{ value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Fast" },
 	{ value: "claude-new-model[1m]", displayName: "New model", description: "New" },
 ];
-const ENV_KEYS = ["PI_CODING_AGENT_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_BRIDGE_ISOLATED", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+const ENV_KEYS = ["PI_CODING_AGENT_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_BRIDGE_ISOLATED", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", ...Object.keys(PARENT_SESSION_ENV), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
 let root;
 let previousEnv;
 let commands;
@@ -23,6 +24,7 @@ let keepAlive;
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "bridge-model-catalog-"));
 	previousEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+	Object.assign(process.env, PARENT_SESSION_ENV, { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "0" });
 	Object.assign(process.env, { PI_CODING_AGENT_DIR: root, CLAUDE_CONFIG_DIR: join(root, "claude"), CLAUDE_CODE_OAUTH_TOKEN: "offline-test", CLAUDE_BRIDGE_ISOLATED: "1", ANTHROPIC_API_KEY: "unused-key", ANTHROPIC_AUTH_TOKEN: "unused-token", ANTHROPIC_BASE_URL: "https://unused.invalid" });
 	commands = new Map();
 	notices = [];
@@ -62,6 +64,8 @@ it("reports the CLI catalog without a model prompt or changing provider registra
 	assert.equal(inputs[0].options.env.ANTHROPIC_API_KEY, undefined);
 	assert.equal(inputs[0].options.env.ANTHROPIC_AUTH_TOKEN, undefined);
 	assert.equal(inputs[0].options.env.ANTHROPIC_BASE_URL, undefined);
+	for (const key of Object.keys(PARENT_SESSION_ENV)) assert.equal(inputs[0].options.env[key], undefined, key);
+	assert.equal(inputs[0].options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
 	assert.equal(closed, 1);
 });
 
@@ -76,6 +80,8 @@ it("uses the active managed profile and refuses to substitute the default login"
 	await command(context);
 	assert.equal(inputs[0].options.env.CLAUDE_CONFIG_DIR, profile.configDir);
 	assert.equal(inputs[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+	for (const key of Object.keys(PARENT_SESSION_ENV)) assert.equal(inputs[0].options.env[key], undefined, key);
+	assert.equal(inputs[0].options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
 	assert.match(notices.at(-1).message, /Account B/);
 	profile = undefined;
 	await command(context);

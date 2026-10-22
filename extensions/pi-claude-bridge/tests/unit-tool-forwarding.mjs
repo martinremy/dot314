@@ -6,7 +6,9 @@
  */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { processAssistantMessage, processStreamEvent } from "../src/index.ts";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { __testSetSdkQueryFactory, processAssistantMessage, processStreamEvent, streamClaudeAgentSdk } from "../src/index.ts";
 import { FINALIZE_MAX_REARMS, endToolUseTurn, finalizeToolUseTurnFromMcpInvocation } from "../src/assistant-stream.ts";
 import { ctx, drainStrandedToolCalls, failStrandedToolCall, resetStack, takeQueuedOrParkedResult } from "../src/query-state.ts";
 
@@ -26,6 +28,75 @@ function installFakeStream() {
 	ctx().currentPiStream = stream;
 	return events;
 }
+
+describe("bash argument forwarding", () => {
+	for (const streamed of [true, false]) {
+		for (const timeout of [undefined, 37]) {
+			it(`preserves ${timeout === undefined ? "omitted" : "explicit"} timeout in ${streamed ? "streamed" : "completed"} calls and MCP dispatch`, async () => {
+				resetStack();
+				const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+				process.env.CLAUDE_CODE_OAUTH_TOKEN = "offline-test";
+				const controller = new AbortController();
+				const args = { command: "echo ok" };
+				if (timeout !== undefined) args.timeout = timeout;
+				const observed = Promise.withResolvers();
+				let client;
+				__testSetSdkQueryFactory(({ options }) => ({
+					async *[Symbol.asyncIterator]() {
+						const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+						await options.mcpServers["custom-tools"].instance.connect(serverTransport);
+						client = new Client({ name: "fake-claude", version: "1.0.0" });
+						await client.connect(clientTransport);
+						yield { type: "system", subtype: "init", session_id: "bash-args-session" };
+						if (streamed) {
+							for (const event of [
+								{ type: "message_start", message: { id: "bash-message", usage: { input_tokens: 1 } } },
+								{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "bash-call", name: "mcp__custom-tools__bash", input: {} } },
+								{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(args) } },
+								{ type: "content_block_stop", index: 0 },
+								{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+								{ type: "message_stop" },
+							]) yield { type: "stream_event", event };
+						} else {
+							yield { type: "assistant", message: { id: "bash-message", content: [{ type: "tool_use", id: "bash-call", name: "mcp__custom-tools__bash", input: args }] } };
+						}
+						const call = client.callTool({ name: "bash", arguments: args });
+						observed.resolve(call);
+						await call;
+						yield { type: "result", subtype: "success", result: "done" };
+					},
+					close() {},
+					async interrupt() {},
+				}));
+				try {
+					const initial = { messages: [
+						{ role: "system", content: "test", toolsAdded: [{ name: "bash", description: "Run", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "number" } } } }], timestamp: 0 },
+						{ role: "user", content: "run", timestamp: 0 },
+					] };
+					const options = { sessionId: `bash-${streamed}-${timeout}`, signal: controller.signal };
+					const first = [];
+					for await (const event of streamClaudeAgentSdk(model, initial, options)) first.push(event);
+					const done = first.find(event => event.type === "done");
+					assert.equal(done?.reason, "toolUse");
+					const toolCall = done.message.content.find(block => block.type === "toolCall");
+					const second = streamClaudeAgentSdk(model, { messages: [...initial.messages, done.message, { role: "toolResult", toolCallId: toolCall.id, toolName: "bash", content: [{ type: "text", text: "ok" }], timestamp: 0 }] }, options);
+					const events = [];
+					for await (const event of second) events.push(event);
+					assert.deepEqual((await observed.promise).content, [{ type: "text", text: "ok" }], "MCP handler matched the executed call's arguments");
+					assert.deepEqual(toolCall.arguments, args);
+					assert.equal(events.at(-1).type, "done");
+				} finally {
+					controller.abort();
+					await client?.close();
+					__testSetSdkQueryFactory();
+					resetStack();
+					if (savedToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+					else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+				}
+			});
+		}
+	}
+});
 
 describe("grace finalize argument settlement", () => {
 	beforeEach(() => resetStack());

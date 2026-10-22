@@ -3568,9 +3568,6 @@ function mapToolArgs(toolName, args) {
     const piKey = renames?.[key] ?? key;
     if (!(piKey in result)) result[piKey] = value;
   }
-  if (toolName.toLowerCase() === "bash" && result.timeout == null) {
-    result.timeout = 120;
-  }
   return result;
 }
 
@@ -32146,10 +32143,24 @@ function subscriberProfileEnv(profile, base = process.env) {
   return env;
 }
 var ANTHROPIC_ROUTING_ENV = ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+var CLAUDE_PARENT_SESSION_ENV = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SSE_PORT",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_EFFORT",
+  "CLAUDE_PID"
+];
 function claudeChildEnv(profile, inheritAnthropicEnv, base = process.env) {
-  if (profile) return subscriberProfileEnv(profile, base);
-  const env = { ...base };
-  if (!inheritAnthropicEnv) for (const key of ANTHROPIC_ROUTING_ENV) delete env[key];
+  const env = profile === void 0 ? { ...base } : subscriberProfileEnv(profile, base);
+  if (profile === void 0 && !inheritAnthropicEnv) for (const key of ANTHROPIC_ROUTING_ENV) delete env[key];
+  for (const key of CLAUDE_PARENT_SESSION_ENV) delete env[key];
+  env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   return env;
 }
 function unmanagedClaudeEnv(base = process.env) {
@@ -47189,9 +47200,10 @@ import { spawn as spawnProcess } from "child_process";
 import { accessSync, closeSync as closeSync2, constants as fsConstants, openSync as openSync2, readSync as readSync2, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
 import { delimiter, join as join7 } from "path";
 function executableFromPath(name) {
+  const fileName = process.platform === "win32" ? `${name}.exe` : name;
   const paths = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
   for (const dir of paths) {
-    const candidate = join7(dir, name);
+    const candidate = join7(dir, fileName);
     try {
       accessSync(candidate, fsConstants.X_OK);
       return candidate;
@@ -51276,7 +51288,6 @@ function startFreshQuery(fresh, syncResult) {
 function index_default(pi2) {
   setExtensionApi(pi2);
   logVersions();
-  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   const config2 = loadConfig(process.cwd());
   const replacement = config2.systemPrompt?.replacement;
   debug("loadConfig:", JSON.stringify(replacement === void 0 ? config2 : { ...config2, systemPrompt: { ...config2.systemPrompt, replacement: `<${replacement.length} chars>` } }));

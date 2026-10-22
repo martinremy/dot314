@@ -7,9 +7,8 @@
 // a string.
 //
 // Pi's side is what the bridge's stream records, not a copy of Claude Code's:
-// a tool call's arguments went through tool-mapping.ts mapToolArgs, so bash
-// carries the default timeout and read's file_path is Pi's path. All values
-// are made up.
+// a tool call's arguments went through tool-mapping.ts mapToolArgs, so read's
+// file_path is Pi's path. All values are made up.
 
 /** The query's tool name maps, as index.ts resolveMcpTools builds them. */
 export const TOOL_NAMES = new Map([["bash", "mcp__custom-tools__bash"], ["read", "mcp__custom-tools__read"]]);
@@ -23,7 +22,7 @@ const PROMPT_2 = "Run sleep 40.";
 export const user = (content) => ({ role: "user", content, timestamp: 0 });
 const claude = (stopReason, content) => ({ role: "assistant", provider: "pi-claude", api: "anthropic", model: "claude-haiku-4-5", stopReason, content, timestamp: 0 });
 const thinking = (text, signature) => ({ type: "thinking", thinking: text, thinkingSignature: signature });
-const bash = (id, command) => ({ type: "toolCall", id, name: "bash", arguments: { command, timeout: 120 } });
+const bash = (id, command) => ({ type: "toolCall", id, name: "bash", arguments: { command } });
 const read = (id, path) => ({ type: "toolCall", id, name: "read", arguments: { path } });
 const result = (toolCallId, toolName, text, isError = false) => ({ role: "toolResult", toolCallId, toolName, content: [{ type: "text", text }], isError, timestamp: 0 });
 

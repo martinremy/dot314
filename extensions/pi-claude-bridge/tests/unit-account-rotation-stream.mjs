@@ -27,6 +27,7 @@ import { CLAUDE_ACCOUNT_ROUTER_SYMBOL } from "../src/account-router.ts";
 import { setConnectorCallAuditSink } from "../src/connector-audit.ts";
 import { ctx, resetStack } from "../src/query-state.ts";
 import { runInRequestLane } from "../src/request-lane.ts";
+import { PARENT_SESSION_ENV } from "./fixtures/parent-session-env.mjs";
 
 const model = {
 	id: "claude-haiku-4-5",
@@ -131,12 +132,15 @@ function bridgeStateFor(sessionId) {
 let notifications;
 let emittedRateLimitEvents;
 let diagDir;
+let parentEnv;
 
 function readDiagLog() {
 	try { return readFileSync(process.env.CLAUDE_BRIDGE_DIAG_PATH, "utf8"); } catch { return ""; }
 }
 
 beforeEach(() => {
+	parentEnv = Object.fromEntries([...Object.keys(PARENT_SESSION_ENV), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"].map(key => [key, process.env[key]]));
+	Object.assign(process.env, PARENT_SESSION_ENV, { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "0" });
 	process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "0";
 	// Legacy (no-router) paths gate on credential presence; an env token is an
 	// existence-only signal that never gets read.
@@ -159,6 +163,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	for (const [key, value] of Object.entries(parentEnv)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
 	delete process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT;
 	delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 	delete process.env.CLAUDE_BRIDGE_DIAG_PATH;
@@ -1296,6 +1304,10 @@ describe("account host probe (probeProfile)", () => {
 			deadlineMs: 500,
 		});
 		assert.deepEqual(probeOptions.tools, [], "built-in tool set removed");
+		for (const key of Object.keys(PARENT_SESSION_ENV)) assert.equal(probeOptions.env[key], undefined, key);
+		assert.equal(probeOptions.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+		for (const [key, value] of Object.entries(PARENT_SESSION_ENV)) assert.equal(process.env[key], value);
+		assert.equal(process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "0");
 		assert.ok(probeOptions.disallowedTools.includes("Bash"), "built-ins disallowed");
 		const hook = probeOptions.hooks?.PreToolUse?.[0]?.hooks?.[0];
 		assert.equal(typeof hook, "function", "deny-all PreToolUse hook registered");

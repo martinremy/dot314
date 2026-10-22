@@ -167,6 +167,24 @@ describe("readAppendSystemPromptFiles isolation", () => {
 });
 
 describe("resolveClaudeExecutable isolation", () => {
+	it("selects Windows native executables, never shell wrappers", (context) => withTempDir((dir) => {
+		context.mock.property(process, "platform", "win32");
+		for (const name of ["claude", "claude.cmd", "claude.ps1", "claude-code"]) {
+			const path = join(dir, name);
+			writeFileSync(path, "shell wrapper");
+			chmodSync(path, 0o755);
+		}
+		withEnv({ PATH: dir, CLAUDE_BRIDGE_ISOLATED: undefined }, () => {
+			assert.equal(resolveClaudeExecutable(), undefined);
+			const native = join(dir, "claude.exe");
+			writeFileSync(native, "MZ fixture");
+			chmodSync(native, 0o755);
+			assert.equal(resolveClaudeExecutable(), native);
+			assert.equal(resolveClaudeExecutable(" /host/pinned.exe "), "/host/pinned.exe");
+			withEnv({ CLAUDE_BRIDGE_ISOLATED: "1" }, () => assert.equal(resolveClaudeExecutable(), undefined));
+		});
+	}));
+
 	it("a configured path always wins", () => {
 		withEnv({ CLAUDE_BRIDGE_ISOLATED: "1" }, () => {
 			assert.equal(resolveClaudeExecutable("/opt/app/bin/claude"), "/opt/app/bin/claude");

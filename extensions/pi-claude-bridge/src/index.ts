@@ -2060,9 +2060,6 @@ function startFreshQuery(fresh: FreshQuery, syncResult: SyncResult): AssistantMe
 export default function (pi: ExtensionAPI) {
 	setExtensionApi(pi);
 	logVersions();
-	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
-	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
-
 	const config = loadConfig(process.cwd());
 	// The replacement is prompt text the user wrote: the log gets its length.
 	const replacement = config.systemPrompt?.replacement;

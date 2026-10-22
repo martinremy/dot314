@@ -6,9 +6,10 @@ import { isolatedFromEnv } from "./config.ts";
 import { DEBUG, debug } from "./debug.ts";
 
 function executableFromPath(name: string): string | undefined {
+	const fileName = process.platform === "win32" ? `${name}.exe` : name;
 	const paths = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
 	for (const dir of paths) {
-		const candidate = join(dir, name);
+		const candidate = join(dir, fileName);
 		try {
 			accessSync(candidate, fsConstants.X_OK);
 			return candidate;
