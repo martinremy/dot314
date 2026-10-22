@@ -64,6 +64,43 @@ function writeImageTranscript(file) {
 const savedImagePath = () => join(getSessionPath(OLD, cwd, claudeDir).replace(/\.jsonl$/, ""), "tool-results", "image.png");
 const rebuild = priors => syncSharedSession([...priors, user("next")], cwd, TOOL_NAMES, MODEL, undefined, { customToolNameToPi: PI_TOOL_NAMES });
 
+for (const [name, content, expected] of [
+	["mixed text and image", [{ type: "text", text: "  first" }, { type: "image", data: REPLACEMENT, mimeType: "image/png" }, { type: "text", text: "second \n" }], "first\nsecond"],
+	["image-only", [{ type: "image", data: REPLACEMENT, mimeType: "image/png" }], "Command failed with no output"],
+]) {
+	it(`rebuilds ${name} failures twice as text only`, async () => {
+		const priors = piPriors({ image1: ORIGINAL });
+		priors[4].content = content;
+		const original = structuredClone(priors);
+		const results = sessionId => readFileSync(getSessionPath(sessionId, cwd, claudeDir), "utf8").trim().split("\n").map(JSON.parse)
+			.flatMap(record => Array.isArray(record.message?.content) ? record.message.content.filter(block => block.type === "tool_result") : []);
+		const first = await rebuild(priors);
+		const imported = results(first.sessionId);
+		assert.deepEqual(imported.map(block => [block.tool_use_id, block.is_error === true]), [["toolu_fixture_1", false], ["toolu_fixture_2", true], ["toolu_fixture_3", true]]);
+		assert.equal(imported[1].content, expected);
+		assert.ok(imported[0].content.some(block => block.type === "image" && block.source.data === ORIGINAL), "successful images remain in native history");
+		setSharedSession({ ...getSharedSession(), needsRebuild: true, rebuildReason: "history-rewritten" });
+		const second = await rebuild(priors);
+		assert.equal(second.sync.forked, priors.length, "the native prefix matches the first import");
+		assert.deepEqual(results(second.sessionId), imported);
+		assert.deepEqual(priors, original);
+	});
+}
+
+it("copies a previously imported failed result with its original image blocks", async () => {
+	const transcript = writeTranscript();
+	const failed = transcript.records.find(record => record.message?.content?.[0]?.tool_use_id === "toolu_fixture_2").message.content[0];
+	failed.content = [{ type: "text", text: "File not found: notes.md" }, { type: "image", source: { type: "base64", data: ORIGINAL, media_type: "image/png" } }];
+	writeFileSync(transcript.path, transcript.records.map(JSON.stringify).join("\n") + "\n");
+	const priors = piPriors();
+	priors[4].content.push({ type: "image", data: ORIGINAL, mimeType: "image/png" });
+	setSharedSession({ sessionId: OLD, cursor: 5, cwd, needsRebuild: true, rebuildReason: "history-rewritten" });
+	const result = await rebuild(priors);
+	assert.equal(result.sync.forked, 7);
+	const records = readFileSync(getSessionPath(result.sessionId, cwd, claudeDir), "utf8").trim().split("\n").map(JSON.parse);
+	assert.deepEqual(records.find(record => record.message?.content?.[0]?.tool_use_id === "toolu_fixture_2").message.content[0], failed);
+});
+
 it("copies only a fork's verified parent prefix into its own working directory", { timeout: 10_000 }, async () => {
 	const old = writeTranscript();
 	const bytes = readFileSync(old.path, "utf8");

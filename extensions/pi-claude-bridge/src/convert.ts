@@ -63,9 +63,16 @@ function imageBlockToAnthropic(block: { data?: string; mimeType?: string }): Con
 	return { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } } as ContentBlock;
 }
 
-export function toolResultContentToAnthropic(
-	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
-): string | ContentBlock[] {
+type ToolResultContent = string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+type PiToolResult = Extract<PiMessage, { role: "toolResult" }>;
+
+/** Text-only failed results must match Claude Code's MCP projection for native replay. */
+export function failedToolResultText(content: ToolResultContent): string {
+	const texts = Array.isArray(content) ? content.flatMap(block => block.type === "text" && block.text ? [block.text] : []) : [content];
+	return texts.join("\n").trim() || "Command failed with no output";
+}
+
+export function toolResultContentToAnthropic(content: ToolResultContent): string | ContentBlock[] {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	const blocks: ContentBlock[] = [];
@@ -108,13 +115,15 @@ export function userMessageToAnthropic(msg: PiMessage): SessionMessage {
 	return { role: "user", content: "[empty]" };
 }
 
-function toolResultToAnthropicBlock(msg: PiMessage, sanitizedIds: Map<string, string>): ContentBlock {
-	const content = toolResultContentToAnthropic(msg.content as string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>);
+function toolResultToAnthropicBlock(msg: PiToolResult, sanitizedIds: Map<string, string>): ContentBlock {
+	const content = msg.isError === true
+		? failedToolResultText(msg.content)
+		: toolResultContentToAnthropic(msg.content);
 	return {
 		type: "tool_result",
-		tool_use_id: sanitizeToolId((msg as { toolCallId: string }).toolCallId, sanitizedIds),
+		tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds),
 		content: content || "",
-		is_error: (msg as { isError?: boolean }).isError,
+		is_error: msg.isError,
 	} as ContentBlock;
 }
 
@@ -277,7 +286,7 @@ export function convertPiMessages(
 		if (message.role === "toolResult" && !resultsById.has(message.toolCallId)) resultsById.set(message.toolCallId, message);
 	}
 
-	const pushToolResultGroup = (toolMessages: PiMessage[]): void => {
+	const pushToolResultGroup = (toolMessages: PiToolResult[]): void => {
 		const included = toolMessages.filter((message) => !isSkippedToolResult(message));
 		if (included.length === 0) return;
 		anthropicMessages.push({
@@ -334,7 +343,7 @@ export function convertPiMessages(
 			// put all tool_result blocks immediately after the tool_use assistant;
 			// replay interleaved user text only after that grouped result message.
 			if (hasToolUse(msg)) {
-				const toolMessages: PiMessage[] = [];
+				const toolMessages: PiToolResult[] = [];
 				const interleavedUsers: PiMessage[] = [];
 				let j = i + 1;
 				for (; j < messages.length; j++) {

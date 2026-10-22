@@ -23,7 +23,7 @@ import { getSessionPath } from "cc-session-io";
 import { readFileSync } from "fs";
 import { isDeepStrictEqual } from "node:util";
 import { isChildExecutedTool } from "./connectors.ts";
-import { PROVIDER_ID, convertPiMessages, isSkippedAssistant, sanitizeToolId, toolResultContentToAnthropic, unreplayableTrailingTurns, userMessageToAnthropic } from "./convert.ts";
+import { PROVIDER_ID, convertPiMessages, failedToolResultText, isSkippedAssistant, sanitizeToolId, toolResultContentToAnthropic, unreplayableTrailingTurns, userMessageToAnthropic } from "./convert.ts";
 import { debug } from "./debug.ts";
 import { nativeResultContentSchema, verifiedStoredImages, type SavedOriginalImage } from "./native-images.ts";
 import { z } from "zod";
@@ -157,9 +157,8 @@ function promptForm(messages: PiMessage[]): unknown {
  *  result as one string: the text blocks joined by newlines and trimmed, or
  *  "Command failed with no output" when that is empty (claude 2.1.296). */
 function deliveredResultForm(message: PiToolResult, toolName: string | undefined): string | NativeResultContent {
+	if (message.isError === true) return failedToolResultText(message.content);
 	const blocks = toolResultToMcpContent(message.content);
-	const failed = message.isError === true;
-	if (failed) return blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim() || "Command failed with no output";
 	if (toolName !== undefined && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
 	return blocks.map((block) =>
 		block.type === "text"

@@ -11,6 +11,24 @@ function convert(messages, customToolNameToSdk) {
 	return convertPiMessages(messages, customToolNameToSdk).anthropicMessages;
 }
 
+describe("failed tool-result replay", () => {
+	const image = { type: "image", data: "offline-image", mimeType: "image/png" };
+	for (const [name, content, expected] of [
+		["mixed text and images", [{ type: "text", text: "  first" }, image, { type: "text", text: "second  \n" }], "first\nsecond"],
+		["images only", [image], "Command failed with no output"],
+		["empty content", [], "Command failed with no output"],
+		["blank text", [{ type: "text", text: " \n " }], "Command failed with no output"],
+		["string content", "  failure\n", "failure"],
+	]) {
+		it(`imports ${name} as error text without changing Pi's result`, () => {
+			const message = { role: "toolResult", toolCallId: "failed-call", isError: true, content };
+			const original = structuredClone(message);
+			assert.deepEqual(convert([message])[0].content, [{ type: "tool_result", tool_use_id: "failed-call", is_error: true, content: expected }]);
+			assert.deepEqual(message, original);
+		});
+	}
+});
+
 // --- Tests ---
 
 describe("tool ID sanitization", () => {

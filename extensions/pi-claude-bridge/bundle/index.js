@@ -1115,6 +1115,10 @@ function imageBlockToAnthropic(block) {
   if (!block.data || !block.mimeType) return void 0;
   return { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } };
 }
+function failedToolResultText(content) {
+  const texts = Array.isArray(content) ? content.flatMap((block) => block.type === "text" && block.text ? [block.text] : []) : [content];
+  return texts.join("\n").trim() || "Command failed with no output";
+}
 function toolResultContentToAnthropic(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -1157,7 +1161,7 @@ function userMessageToAnthropic(msg) {
   return { role: "user", content: "[empty]" };
 }
 function toolResultToAnthropicBlock(msg, sanitizedIds) {
-  const content = toolResultContentToAnthropic(msg.content);
+  const content = msg.isError === true ? failedToolResultText(msg.content) : toolResultContentToAnthropic(msg.content);
   return {
     type: "tool_result",
     tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds),
@@ -48160,9 +48164,8 @@ function promptForm(messages) {
   return blocks ?? extractUserPrompt(messages);
 }
 function deliveredResultForm(message, toolName) {
+  if (message.isError === true) return failedToolResultText(message.content);
   const blocks = toolResultToMcpContent(message.content);
-  const failed = message.isError === true;
-  if (failed) return blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim() || "Command failed with no output";
   if (toolName !== void 0 && blocks.every((block) => block.type === "text" && block.text.trim() === "")) return `(${toolName} completed with no output)`;
   return blocks.map((block) => block.type === "text" ? { type: "text", text: block.text } : { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
 }
