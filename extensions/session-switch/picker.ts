@@ -12,6 +12,7 @@ import {
 	loadSessionPreviewText,
 	type ScannedSession,
 } from "./session-scanner.ts";
+import { installSearchSelectionReset } from "./session-search.ts";
 import { SessionStreamController } from "./session-stream.ts";
 
 export type SessionPickerDismissReason = "cancel" | "exit";
@@ -478,6 +479,7 @@ export async function openSessionSwitchPicker(
 			},
 			currentSessionPath,
 		);
+		installSearchSelectionReset(selector);
 		streamController.attach(selector.getSessionList());
 		tui.setFocus(selector.getSessionList());
 

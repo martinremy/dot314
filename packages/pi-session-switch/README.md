@@ -48,7 +48,8 @@ This is an extension-only workaround for startup switching. Unlike native `pi --
 
 - `/switch-session` stays on Pi's native in-process session switch path
 - `pi --switch-session` reuses the same picker UI, then relaunches Pi into the selected session
-- Mirrors the native `/resume` picker layout, behaviors, and keybindings for the command path
+- Uses the native `/resume` picker layout and keybindings
+- Search edits select the top result in both Current Folder and All scopes. By default, search results are ranked by relevance. As more sessions load, selection follows the top result until you navigate with the arrow or page keys.
 - Shows a live preview of the highlighted session below the picker
 - Shows the selected session's latest message time at the right edge of the preview
 - `Shift+Up` / `Shift+Down` scroll the preview by line

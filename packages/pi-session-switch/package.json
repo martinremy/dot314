@@ -1,6 +1,6 @@
 {
   "name": "pi-session-switch",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Preview each session before switching in a mirror of Pi's native `/resume`-picker UI",
   "keywords": ["pi-package", "pi", "pi-coding-agent", "session"],
   "license": "MIT",
@@ -19,7 +19,8 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "scripts": {
     "prepack": "node ../../scripts/pi-package-prepack.mjs"

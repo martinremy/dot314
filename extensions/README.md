@@ -306,9 +306,10 @@
 
 - ◐ [`session-switch/`](session-switch/) (upstream: [pi-thread-switcher](https://github.com/damianpdr/pi-thread-switcher))
   - Session switching via `/switch-session`, or the same picker after interactive startup via `pi --switch-session`, with a live preview of the highlighted session and its latest message time below the picker
+  - Search edits select the top result in Current Folder and All scopes. The default sort ranks matches by relevance, and selection follows the top result as sessions load until you navigate the list.
   - `pi --switch-session` is an extension-driven relaunch workaround, not native pre-start `--resume`, so it does not provide native missing-cwd recovery or the normal in-process session-switch lifecycle / shutdown-hook cleanup semantics
   - `Shift+Up`/`Down` scroll preview by line, `Shift+PageUp`/`PageDown` page preview
-  - Mirrors the native `/resume` picker's layout, behaviors, and keybindings
+  - Uses the native `/resume` picker layout and keybindings
 
 <p align="center">
   <img width="450" alt="/switch-session demo" src="https://raw.githubusercontent.com/w-winter/dot314/main/assets/switch-session-demo.gif" />
